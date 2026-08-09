@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "serverless-wiki": {
+      "type": "http",
+      "url": "https://<cloudfront-domain>/mcp",
+      "oauth": {
+        "clientId": "<mcp-client-id>",
+        "callbackPort": 33418
+      }
+    }
+  }
+}

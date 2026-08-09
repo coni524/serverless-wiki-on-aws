@@ -1,0 +1,21 @@
+{
+  "name": "slwiki-obsidian",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Obsidian sync plugin for serverless-wiki-on-aws",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild test/cycles.test.ts --bundle --platform=node --format=esm --alias:obsidian=./test/obsidian-stub.ts --outfile=test/.cycles.mjs --log-level=warning && node test/.cycles.mjs",
+    "link-vault": "node scripts/link-vault.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "builtin-modules": "^5.0.0",
+    "esbuild": "^0.28.1",
+    "obsidian": "^1.8.7",
+    "typescript": "^7.0.2"
+  }
+}

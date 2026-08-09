@@ -1,0 +1,27 @@
+diff --git a/dist/model-factory.js b/dist/model-factory.js
+index 9b3625eb2a2fead3261ae522ccc86b6068089030..ef681ea1d7558a3e1fbbe9d9b161406e1b903fa1 100644
+--- a/dist/model-factory.js
++++ b/dist/model-factory.js
+@@ -141,6 +141,9 @@ export async function createStrandsModel(config, log) {
+                 maxTokens: config.inferenceConfig.maxTokens,
+                 stopSequences: config.inferenceConfig.stopSequences,
+             }),
++            ...(config.additionalRequestFields !== undefined && {
++                additionalRequestFields: config.additionalRequestFields,
++            }),
+         });
+     }
+     if (config.provider === 'openai-api') {
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index 91126112054e47134a0453283fa3c77a90967dfb..7babc15b3c58430e05cccf3a358d9dd791bd4abd 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -17,6 +17,8 @@ export interface ModelConfig {
+     /** API key for openai-api provider. Accepts a string or an async resolver (e.g., `() => appSetting.get()`). Falls back to OPENAI_API_KEY env var. */
+     apiKey?: string | (() => Promise<string>);
+     inferenceConfig?: InferenceConfig;
++    /** Extra fields passed through to Bedrock's `additionalModelRequestFields` (e.g. `{ thinking: { type: 'disabled' } }`). Bedrock provider only. */
++    additionalRequestFields?: JSONValue;
+     guardrails?: GuardrailsConfig;
+ }
+ export interface InferenceConfig {

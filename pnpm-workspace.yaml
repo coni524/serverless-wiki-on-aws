@@ -1,0 +1,16 @@
+packages:
+  - aws-blocks
+  - clients/*
+
+allowBuilds:
+  esbuild: true
+
+patchedDependencies:
+  '@aws-blocks/bb-agent': patches/@aws-blocks__bb-agent.patch
+
+# The aws-blocks/client.js that AWS Blocks generates imports @aws-blocks/bb-*
+# directly. Those are transitive dependencies of @aws-blocks/blocks, which pnpm's
+# strict node_modules layout does not resolve, so the @aws-blocks scope alone is
+# hoisted to the root node_modules.
+publicHoistPattern:
+  - '@aws-blocks/*'

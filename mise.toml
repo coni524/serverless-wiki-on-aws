@@ -1,0 +1,11 @@
+# Tool versions for this repository (mise).
+#
+# Node is pinned to the 24 line on purpose: the deployed Lambda functions run on
+# the `nodejs24.x` managed runtime, so the local Node that builds and bundles
+# them must be the same major. Bumping this without bumping the Lambda runtime
+# would let code compile locally against APIs the runtime does not have.
+#
+# pnpm is pinned to the major that `packageManager` in package.json declares.
+[tools]
+node = "24"
+pnpm = "11"

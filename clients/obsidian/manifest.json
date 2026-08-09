@@ -1,0 +1,9 @@
+{
+  "id": "slwiki-sync",
+  "name": "sl-wiki Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Sync the spaces of a serverless-wiki-on-aws wiki as folders in your vault.",
+  "author": "coni524",
+  "isDesktopOnly": false
+}

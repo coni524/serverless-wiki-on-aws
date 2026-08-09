@@ -1,0 +1,17 @@
+/* A setting that belongs to the space listed above it, indented to show it. */
+.slwiki-sub-setting {
+  padding-left: var(--size-4-6);
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+/* The one thing the settings screen draws that is not an Obsidian `Setting`. */
+.slwiki-warning {
+  margin-top: var(--size-4-4);
+  padding: var(--size-4-3);
+  border-left: 3px solid var(--text-warning);
+  border-radius: var(--radius-s);
+  background-color: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: var(--line-height-tight);
+}

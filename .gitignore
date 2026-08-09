@@ -1,0 +1,43 @@
+dist
+node_modules
+build-temp
+.blocks-sandbox
+cdk.out/
+# The frontend build `pnpm run deploy` stages before sending it to S3.
+.hosting/
+aws-blocks/client.js
+aws-blocks/blocks.spec.json
+.bb-data/
+# Where CDK accumulates the answers to its environment lookups.
+cdk.context.json
+# Where AWS Blocks writes the identifier of the stack it deploys to.
+.blocks/config.json
+
+# The Obsidian plugin build. Obsidian reads main.js directly under the plugin
+# directory, so the output goes to the package root rather than to dist/.
+clients/obsidian/main.js
+clients/obsidian/main.js.map
+# Once a vault symlinks the plugin, Obsidian writes the settings here.
+clients/obsidian/data.json
+# Where the sync keeps its page-id-to-file table.
+clients/obsidian/sync-state.json
+# The bundled test `pnpm run test` runs.
+clients/obsidian/test/.cycles.mjs
+
+# Secrets and personal environment
+.env
+.env.*
+!.env.example
+.aws/
+*.pem
+*.key
+.DS_Store
+# Holds the real hosting origin and client id. The template is .mcp.json.example.
+.mcp.json
+# A local-only list of identifiers that must never be committed. Never published.
+.banned-patterns
+.claude/settings.local.json
+
+# The search corpus derived from page bodies. The folder itself stays, via .gitkeep.
+.search-corpus/*
+!.search-corpus/.gitkeep

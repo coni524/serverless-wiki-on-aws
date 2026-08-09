@@ -1,0 +1,217 @@
+/* The only styles this app still owns.
+   Everything else — layout, forms, tables, the assistant drawer — comes from
+   Cloudscape. What is left is the rendered Markdown body, which is
+   raw HTML built by src/markdown.ts, the diff of a pending AI edit, which
+   Cloudscape has no component for, and the two behaviours the navigation panel
+   needs but AppLayout does not provide: row controls that appear under the
+   pointer, and an edge that can be dragged. */
+
+/* The navigation panel's header row (src/components/SpaceNavigation.tsx).
+
+   Three controls sit on this line and only two of them are in the row: the
+   space switcher and the plus are, and `AppLayout` pins its collapse button
+   over the panel's top-right corner, 15px below the top and 16px in from the
+   end. So the row takes that same 15px above and below its own controls, and
+   since all three are Cloudscape buttons of one height, the three centres land
+   on top of each other. The end padding is what keeps the plus clear of the
+   corner the collapse button occupies.
+
+   The 15px is `AppLayout`'s own offset, read off the panel it draws. A future
+   version of Cloudscape that changes it costs a pixel of alignment, which is
+   why it is worth stating here rather than hiding behind a rounder number.
+
+   The inline start matches the tree's inset below it, so the switcher and the
+   first level of the tree begin at the same edge. The divider is Cloudscape's
+   own token, handed in by the component the way the resizer does it: this file
+   names the colour but does not choose it. */
+.wiki-nav-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-block: 15px;
+  padding-inline: 8px 48px;
+  border-block-end: 1px solid var(--wiki-nav-header-border);
+}
+
+/* The page tree's own inset (src/components/PageTree.tsx).
+
+   The drawer around it runs with `disableContentPaddings`, so this is the whole
+   inset the tree gets. It is deliberately small: `TreeView` indents every level
+   again, and whatever is spent here is taken off the title of the deepest page
+   in the panel. The end is smaller still, because the row's own controls sit
+   there and already stand off the edge. */
+.wiki-page-tree {
+  padding-block: 12px 40px;
+  padding-inline: 8px 4px;
+}
+
+/* One line per row, cut with an ellipsis rather than wrapped.
+
+   `TruncatedText` handles the cut itself; what it needs is a column that is
+   allowed to be narrower than its text. The row is a two-column grid — toggle,
+   then content — and a `1fr` track refuses to shrink below the content's
+   min-content width, which for text that may not wrap is the whole title. The
+   grid is restated here with a floor of zero so the track can shrink and the
+   ellipsis appears; without it the title would push the row wider than the
+   panel. */
+.wiki-page-tree li[role='treeitem'] > div {
+  grid-template-columns: 28px minmax(0, 1fr);
+}
+
+/* The controls on a page-tree row (src/components/PageTree.tsx).
+
+   They are in the DOM for every row and faded out, not removed: the row keeps
+   the space they occupy, so a title does not jump sideways as the pointer
+   arrives, and the keyboard can still reach them — `:focus-within` brings them
+   back into view when tabbing lands on one.
+
+   Fading is `opacity`, not `visibility`, because a hidden `visibility` can be
+   turned back on by a descendant and Cloudscape's button dropdown does exactly
+   that to its own trigger. Opacity cannot be undone from the inside.
+
+   `li[role='treeitem'] > div` is the row itself. Cloudscape puts the child rows
+   in a sibling `ul`, so hovering a child does not light up its ancestors. The
+   `:has` rule keeps the menu visible while its dropdown is open, which is when
+   the pointer has left the row for the menu. */
+.wiki-tree-actions {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  opacity: 0;
+  pointer-events: none;
+}
+.wiki-page-tree li[role='treeitem'] > div:hover .wiki-tree-actions,
+.wiki-page-tree li[role='treeitem'] > div:focus-within .wiki-tree-actions,
+.wiki-page-tree .wiki-tree-actions:has([aria-expanded='true']) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The navigation panel's drag handle (src/components/NavigationResizer.tsx).
+
+   Fixed to the panel's right edge, from below the top bar to the foot of the
+   viewport. The strip is wider than the line it draws so it is easy to grab;
+   the line itself only appears on hover, on focus, and while dragging, so a
+   panel nobody is resizing has no extra border. */
+.wiki-nav-resizer {
+  position: fixed;
+  bottom: 0;
+  width: 11px;
+  margin-left: -5px;
+  z-index: 840;
+  cursor: col-resize;
+  touch-action: none;
+}
+.wiki-nav-resizer::after {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline: 5px;
+  background: transparent;
+}
+.wiki-nav-resizer:hover::after,
+.wiki-nav-resizer:focus-visible::after,
+.wiki-nav-resizer-active::after {
+  /* Handed in by the component as a Cloudscape design token, the way the diff
+     does it: this file names the colour but does not choose it. */
+  background: var(--wiki-resizer-color);
+}
+.wiki-nav-resizer:focus {
+  outline: none;
+}
+
+.markdown {
+  line-height: 1.7;
+  word-break: break-word;
+}
+.markdown > :first-child { margin-top: 0; }
+.markdown h1,
+.markdown h2,
+.markdown h3 { margin-top: 1.4em; }
+.markdown pre {
+  background: #1f2430;
+  color: #e6e6e6;
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.markdown code {
+  background: #f3f3f3;
+  border: 1px solid #d5dbdb;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.9em;
+}
+.markdown pre code { background: none; border: none; padding: 0; }
+.markdown blockquote {
+  border-left: 3px solid #d5dbdb;
+  margin: 0;
+  padding-left: 14px;
+  color: #5f6b7a;
+}
+.markdown a { color: #006ce0; }
+.markdown img { max-width: 100%; }
+
+/* The diff of a pending AI edit (src/components/PendingChange.tsx).
+
+   The colours and the monospace face are Cloudscape's own design tokens, handed
+   in as custom properties by the component — this file names them
+   but does not choose them, so the diff follows the theme like everything else.
+   Colour is never the only signal: every row carries a +, −, or blank marker,
+   changed rows carry a left border, and the characters that differ inside a
+   replaced line are a `mark` element, which carries the meaning on its own. */
+.diff {
+  font-family: var(--diff-font);
+  font-size: 12px;
+  line-height: 1.6;
+  border: 1px solid var(--diff-border);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 8px;
+  border-left: 3px solid transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-marker {
+  flex: 0 0 auto;
+  width: 1ch;
+  opacity: 0.7;
+  user-select: none;
+}
+.diff-text { flex: 1 1 auto; }
+.diff-add {
+  background: var(--diff-add-background);
+  border-left-color: var(--diff-add-border);
+}
+.diff-remove {
+  background: var(--diff-remove-background);
+  border-left-color: var(--diff-remove-border);
+}
+.diff-same { color: var(--diff-same-text); }
+
+/* The characters that differ inside a replaced line.
+
+   The row's own background already says the line changed; this says where. It
+   is drawn from the same status colour the row's left border uses, so the two
+   levels read as one scale rather than two palettes, and it inherits the row's
+   text colour instead of `mark`'s default black-on-yellow — which would ignore
+   the theme entirely and be unreadable in the dark one.
+
+   The flat colour is the fallback. `color-mix` follows it and wins wherever it
+   is supported, softening the block so the text over it stays legible; a
+   browser without it lands on the saturated colour, which is still readable and
+   still points at the right characters. */
+.diff-changed {
+  color: inherit;
+  background: var(--diff-changed-color);
+  background: color-mix(in srgb, var(--diff-changed-color) 40%, transparent);
+  border-radius: 2px;
+  font-weight: 700;
+}
+.diff-add .diff-changed { --diff-changed-color: var(--diff-add-border); }
+.diff-remove .diff-changed { --diff-changed-color: var(--diff-remove-border); }
