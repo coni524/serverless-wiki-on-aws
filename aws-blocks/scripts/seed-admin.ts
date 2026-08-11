@@ -5,6 +5,8 @@
  * administrator is four records an operator writes straight into the table:
  * the `ug_admins` user group, the `rg_global_admin` role group, the attachment
  * between them, and one membership pointing at the operator's Cognito `sub`.
+ * A fifth write moves the permission epoch, so warm Lambdas holding a cached
+ * "no permissions" answer for this account pick the change up immediately.
  *
  *   AWS:    AWS_PROFILE=<profile> pnpm run seed-admin -- --table <name> --email you@example.com
  *   local:  pnpm run seed-admin -- --local --email admin@example.test
@@ -26,6 +28,7 @@
  * administrator who signs in and sees no spaces.
  */
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +40,8 @@ import {
   ALL_ROLE_GROUPS,
   ALL_USERS,
   ALL_USER_GROUPS,
+  CONFIG_EPOCH,
+  CONFIG_PK,
   META,
   PROFILE,
   SYSTEM_ADMIN_ROLE_GROUP,
@@ -128,6 +133,24 @@ export function adminRecords(userSub: string, at: string): Item[] {
 }
 
 /**
+ * A new generation of the permission epoch, shaped exactly like the record
+ * `bumpEpoch()` in `access.ts` writes. Duplicated here because importing
+ * `access.ts` would drag the whole Lambda runtime into this standalone script.
+ *
+ * Without this write, a warm Lambda that has already resolved "no permissions"
+ * for this account keeps serving that cached answer until its TTL runs out,
+ * and the freshly seeded administrator stays locked out for up to five minutes.
+ */
+export function epochRecord(at: string): Item {
+  return itemSchema.parse({
+    pk: CONFIG_PK,
+    sk: CONFIG_EPOCH,
+    type: 'EPOCH',
+    epoch: `${at}#${randomUUID()}`,
+  });
+}
+
+/**
  * Where the records go. The two implementations differ only in how they read
  * one index and write one item; everything above them is shared.
  */
@@ -136,6 +159,8 @@ type Store = {
   findUserSub(email: string): Promise<string | null>;
   /** Writes unless the key is taken. `false` means the record was already there. */
   putIfAbsent(record: Item): Promise<boolean>;
+  /** Last-writer-wins write; the epoch record is meant to be overwritten. */
+  put(record: Item): Promise<void>;
 };
 
 // ─── Local mock ──────────────────────────────────────────────────────────────
@@ -167,6 +192,10 @@ function localStore(): Store {
       data.set(key, record);
       flush();
       return true;
+    },
+    async put(record) {
+      data.set(localKey(record.pk, record.sk), record);
+      flush();
     },
   };
 }
@@ -237,6 +266,16 @@ function awsStore(tableName: string): Store {
         throw error;
       }
     },
+    async put(record) {
+      await awsCli([
+        'dynamodb',
+        'put-item',
+        '--table-name',
+        tableName,
+        '--item',
+        JSON.stringify(marshal(record)),
+      ]);
+    },
   };
 }
 
@@ -263,11 +302,16 @@ export async function seed(
     if (created) written += 1;
     log(`  ${record.pk} / ${record.sk}${created ? '' : '  (already present)'}`);
   }
-  log(
-    written === 0
-      ? 'Nothing to do: this account is already a global administrator.'
-      : `Wrote ${written} record(s). Sign in again; the permission check runs per request.`,
-  );
+  if (written === 0) {
+    log('Nothing to do: this account is already a global administrator.');
+    return;
+  }
+  // The permissions changed, so the epoch has to move, the same as the API
+  // does after every permission edit. Warm Lambdas drop their cached walks
+  // only when they see a new generation.
+  await store.put(epochRecord(new Date().toISOString()));
+  log(`  ${CONFIG_PK} / ${CONFIG_EPOCH}  (new generation)`);
+  log(`Wrote ${written} record(s). Sign in again; the permission check runs per request.`);
 }
 
 /**
