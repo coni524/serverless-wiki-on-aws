@@ -29,8 +29,8 @@ import { isViewingLocale, withViewing, withoutViewing } from '../aws-blocks/view
 import { unescapeModelNewlines } from '../aws-blocks/model-text.js';
 import { withoutDiscardedReplies } from '../aws-blocks/transcript.js';
 import { devServerIsUp, seed, seedLocal } from '../aws-blocks/scripts/seed-admin.js';
-import { countChanges, diffLines, tooLargeToDiff } from '../src/diff.js';
-import { MAX_IMAGE_REFS, collectAttachmentRefs, renderMarkdown } from '../src/markdown.js';
+import { countChanges, diffLines, tooLargeToDiff } from '../src/lib/diff.js';
+import { MAX_IMAGE_REFS, collectAttachmentRefs, renderMarkdown } from '../src/lib/markdown.js';
 import { join } from 'node:path';
 import { installCookieJar } from '@aws-blocks/blocks/utils';
 import type { api as ApiType, authApi as AuthApiType } from 'aws-blocks';
@@ -696,13 +696,13 @@ test('pages: saving keeps the old revision and makes the new one current', async
 });
 
 test('pages: the client stamp is the one the server honours', async () => {
-  // The stamp format lives twice — `stampOf` (src/cache.ts) on the client,
+  // The stamp format lives twice — `stampOf` (src/features/pages/api/page-cache.ts) on the client,
   // `bodyStamp` (aws-blocks/wiki-ops.ts) on the server — and nothing but this
   // test ties them together. If one side changes alone there is no type error
   // and no other failing test; the symptom is a stale body rendered as current.
-  // Imported here, not at the top: `src/cache.ts` pulls in the API
+  // Imported here, not at the top: `src/features/pages/api/page-cache.ts` pulls in the API
   // client, which must not load before `installCookieJar()` runs.
-  const { stampOf } = await import('../src/cache.js');
+  const { stampOf } = await import('../src/features/pages/api/page-cache.js');
   const created = await api.createPage({ spaceId, title: 'Stamped', body: 'first body' });
 
   // The client learns stamps from list responses, so build this one the same way.

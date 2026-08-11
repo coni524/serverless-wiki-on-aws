@@ -25,7 +25,7 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
  *
  * Sized for a page body full of images, which is the only caller that asks for
  * more than one. The frontend caps its own request to match (`MAX_IMAGE_REFS` in
- * `src/markdown.ts`), so this bound is what stops a hand-built request, not
+ * `src/lib/markdown.ts`), so this bound is what stops a hand-built request, not
  * what the UI runs into.
  */
 export const MAX_SIGNED_ATTACHMENTS = 200;

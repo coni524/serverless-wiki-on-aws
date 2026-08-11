@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { colorBorderItemFocused } from '@cloudscape-design/design-tokens';
-import { useT } from '../i18n';
+import { useT } from '@/lib/i18n';
 
 export const NAVIGATION_WIDTH_MIN = 200;
 export const NAVIGATION_WIDTH_MAX = 560;

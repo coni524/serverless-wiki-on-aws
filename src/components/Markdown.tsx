@@ -1,6 +1,6 @@
 import Box from '@cloudscape-design/components/box';
-import { useT } from '../i18n';
-import { renderMarkdown, type ImageUrls } from '../markdown';
+import { useT } from '@/lib/i18n';
+import { renderMarkdown, type ImageUrls } from '@/lib/markdown';
 
 /**
  * Render Markdown as sanitized HTML. The only Markdown surface in the app.
