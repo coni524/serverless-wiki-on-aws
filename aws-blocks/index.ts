@@ -60,6 +60,7 @@ import {
   listAttachments as listPageAttachments,
 } from './attachment-ops.js';
 import { reclaimJob } from './reclaim.js';
+import { requestKeywordIndex } from './keyword-index.js';
 import { deleteCorpusBatch, requestReingest } from './search-corpus.js';
 import {
   type ViewingClaim,
@@ -77,6 +78,7 @@ import {
   requireOneLine,
   resolveViewing,
   searchPages,
+  suggestPages,
   updatePage as updateWikiPage,
 } from './wiki-ops.js';
 // Imported for its side effect: the module constructs the `RawRoute`s of the
@@ -344,7 +346,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   // ─── Search ──────────────────────────────────────────────────────────────
 
   /**
-   * Semantic search over page text.
+   * Search over page text, semantic and keyword fused into one ranking.
    *
    * The work is in `searchPages`, which the assistant's `searchWiki` tool calls
    * too — including the `filterReadable` gate every hit passes through.
@@ -352,6 +354,18 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async search(query: string, options?: { spaceId?: string; limit?: number }) {
     const access = await requireAccess(context);
     return await searchPages(access, query, options);
+  },
+
+  /**
+   * Suggestions while the query is still being typed.
+   *
+   * Called on keystrokes, so it runs only the searches that answer from the
+   * handler's own memory — see `suggestPages`, which also holds the same
+   * `filterReadable` gate the full search passes through.
+   */
+  async suggest(query: string, options?: { spaceId?: string; limit?: number }) {
+    const access = await requireAccess(context);
+    return await suggestPages(access, query, options);
   },
 
   // ─── AI assistant ────────────────────────────────────────────────────────
@@ -610,6 +624,9 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     await table.delete({ pk: spacePk(spaceId), sk: META });
     await submitReclaim(reclaiming);
     await requestReingest();
+    // The corpus prefix is empty now, so this rebuild removes the space's
+    // keyword index file rather than writing one.
+    await requestKeywordIndex(spaceId);
     return { spaceId };
   },
 

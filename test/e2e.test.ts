@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { setTimeout } from 'node:timers/promises';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 
 import { leafOnlyDeleteRefusal } from '../aws-blocks/refusals.js';
 import { isViewingLocale, withViewing, withoutViewing } from '../aws-blocks/viewing.js';
@@ -329,7 +329,11 @@ test('bootstrap: seeding an address that never signed in is refused', async () =
   // The sub comes from the profile record the first sign-in writes, so there is
   // nothing to point a membership at until then. Guessing one would create a
   // membership for an account that may never exist.
-  const store = { async findUserSub() { return null; }, async putIfAbsent() { return true; } };
+  const store = {
+    async findUserSub() { return null; },
+    async putIfAbsent() { return true; },
+    async put() {},
+  };
   await rejects(() => seed(store, 'nobody@example.test', () => {}), 'signed in');
 });
 
@@ -338,6 +342,7 @@ test('bootstrap: re-running the seeding writes nothing the second time', async (
   // half-finished run converge and what stops a re-run from overwriting an edge
   // that was edited since.
   const written = new Map<string, unknown>();
+  let epochBumps = 0;
   const store = {
     async findUserSub() { return 'sub-under-test'; },
     async putIfAbsent(record: { pk: string; sk: string }) {
@@ -346,12 +351,15 @@ test('bootstrap: re-running the seeding writes nothing the second time', async (
       written.set(key, record);
       return true;
     },
+    async put() { epochBumps += 1; },
   };
 
   await seed(store, ADMIN, () => {});
   assert.strictEqual(written.size, 4, 'Expected the four records the model calls for');
+  assert.strictEqual(epochBumps, 1, 'Seeding changed permissions, so the epoch must move');
   await seed(store, ADMIN, () => {});
   assert.strictEqual(written.size, 4, 'A second run must not add records');
+  assert.strictEqual(epochBumps, 1, 'A run that wrote nothing must leave the epoch alone');
 });
 
 test('access: a user with no groups reaches nothing', async () => {
@@ -2741,4 +2749,180 @@ test('collectAttachmentRefs stops at the number the API will sign', () => {
   );
 
   assert.strictEqual(collectAttachmentRefs(body).length, MAX_IMAGE_REFS);
+});
+
+// ─── Keyword search ──────────────────────────────────────────────────────────
+//
+// The keyword index is rebuilt by a debounced job (a short one locally), so
+// these tests poll rather than assert on the first answer. The token below is
+// deliberately meaningless: nothing embeds it near anything, so only the
+// keyword half of the fused search can produce the hit.
+
+const SEARCH_TOKEN = `kwidx${Date.now().toString(36)}`;
+let searchSpaceId = '';
+let searchPageId = '';
+
+/** Poll the fused search until the predicate holds or the attempts run out. */
+async function searchUntil(
+  query: string,
+  matches: (items: Awaited<ReturnType<typeof api.search>>['items']) => boolean,
+  attempts = 30,
+): Promise<Awaited<ReturnType<typeof api.search>>['items']> {
+  let items: Awaited<ReturnType<typeof api.search>>['items'] = [];
+  for (let i = 0; i < attempts; i += 1) {
+    ({ items } = await api.search(query));
+    if (matches(items)) return items;
+    await setTimeout(500);
+  }
+  return items;
+}
+
+test('search: a saved page is found by its keyword once the index is rebuilt', async () => {
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+  searchSpaceId = (await api.createSpace({ name: `E2E search ${Date.now()}` })).spaceId;
+  const created = await api.createPage({
+    spaceId: searchSpaceId,
+    title: '検索の的',
+    body: `識別子 ${SEARCH_TOKEN} を含む、転置インデックスの検証用ページ。`,
+  });
+  searchPageId = created.pageId;
+
+  const items = await searchUntil(SEARCH_TOKEN, (hits) =>
+    hits.some((hit) => hit.pageId === searchPageId),
+  );
+  assert.ok(
+    items.some((hit) => hit.pageId === searchPageId),
+    `The page never surfaced for "${SEARCH_TOKEN}": ${JSON.stringify(items)}`,
+  );
+
+  // The job wrote the space's index file where the local backend keeps it.
+  assert.ok(
+    existsSync(join(process.cwd(), '.keyword-index', `${searchSpaceId}.json`)),
+    'The index file was not written',
+  );
+});
+
+test('search: a keyword hit carries an excerpt with the match emphasized', async () => {
+  // The token is meaningless on purpose, so the excerpt can only have come
+  // from the corpus read, not from a semantic chunk.
+  const items = await searchUntil(SEARCH_TOKEN, (hits) =>
+    hits.some((hit) => hit.pageId === searchPageId && hit.highlights.length > 0),
+  );
+  const hit = items.find((item) => item.pageId === searchPageId);
+  assert.ok(hit !== undefined, 'The page fell out of the results');
+  assert.ok(hit.snippet.includes(SEARCH_TOKEN), `The excerpt lacks the token: ${hit.snippet}`);
+  const emphasized = hit.highlights.map(([start, end]) => hit.snippet.slice(start, end));
+  assert.deepStrictEqual(emphasized, [SEARCH_TOKEN], 'Exactly the token should be emphasized');
+});
+
+test('search: Japanese text is found through its bigrams', async () => {
+  const items = await searchUntil('転置インデックス', (hits) =>
+    hits.some((hit) => hit.pageId === searchPageId),
+  );
+  assert.ok(items.some((hit) => hit.pageId === searchPageId));
+});
+
+// ─── Suggestions ─────────────────────────────────────────────────────────────
+//
+// The suggestion endpoint runs only the two searches that answer from memory,
+// so a hit depends on the same rebuilt index the tests above waited for.
+
+/** Poll the suggestions until the predicate holds or the attempts run out. */
+async function suggestUntil(
+  query: string,
+  matches: (items: Awaited<ReturnType<typeof api.suggest>>['items']) => boolean,
+  attempts = 30,
+): Promise<Awaited<ReturnType<typeof api.suggest>>['items']> {
+  let items: Awaited<ReturnType<typeof api.suggest>>['items'] = [];
+  for (let i = 0; i < attempts; i += 1) {
+    ({ items } = await api.suggest(query));
+    if (matches(items)) return items;
+    await setTimeout(500);
+  }
+  return items;
+}
+
+test('suggest: a single character offers the page whose title starts with it', async () => {
+  // 「検」 makes no bigram, so the inverted index cannot see it — this is the
+  // gap the title prefix half of the suggestions exists to cover.
+  const items = await suggestUntil('検', (hits) =>
+    hits.some((hit) => hit.pageId === searchPageId),
+  );
+  const hit = items.find((item) => item.pageId === searchPageId);
+  assert.ok(hit !== undefined, `The page was not suggested: ${JSON.stringify(items)}`);
+  assert.strictEqual(hit.title, '検索の的', 'The suggestion carries the live title');
+  assert.strictEqual(hit.spaceId, searchSpaceId);
+
+  // The same single character reaches nothing through the search itself.
+  assert.deepStrictEqual(
+    (await api.search('検')).items.filter((item) => item.pageId === searchPageId),
+    [],
+    'A one-character query is out of the inverted index by design',
+  );
+});
+
+test('suggest: a word in the body offers the page too', async () => {
+  const items = await suggestUntil(SEARCH_TOKEN, (hits) =>
+    hits.some((hit) => hit.pageId === searchPageId),
+  );
+  assert.ok(items.some((hit) => hit.pageId === searchPageId));
+});
+
+test('suggest: a page in an unreadable space is never offered', async () => {
+  await signInAs(USERNAME, PASSWORD);
+  for (const query of ['検', SEARCH_TOKEN]) {
+    const { items } = await api.suggest(query);
+    assert.ok(
+      items.every((hit) => hit.spaceId !== searchSpaceId),
+      `A suggestion leaked from an unreadable space for "${query}"`,
+    );
+  }
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+});
+
+test('search: confining to the space still finds the page', async () => {
+  const { items } = await api.search(SEARCH_TOKEN, { spaceId: searchSpaceId });
+  assert.ok(items.some((hit) => hit.pageId === searchPageId));
+});
+
+test('search: a keyword hit in an unreadable space is not returned', async () => {
+  // The ordinary user holds no grant on the search space, so the same query
+  // that answered above must answer nothing here.
+  await signInAs(USERNAME, PASSWORD);
+  const { items } = await api.search(SEARCH_TOKEN);
+  assert.ok(
+    items.every((hit) => hit.spaceId !== searchSpaceId),
+    'A keyword hit leaked from an unreadable space',
+  );
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+});
+
+test('search: a deleted page falls out of the keyword index', async () => {
+  await api.deletePage(searchPageId);
+  const items = await searchUntil(
+    SEARCH_TOKEN,
+    (hits) => hits.every((hit) => hit.pageId !== searchPageId),
+  );
+  assert.ok(
+    items.every((hit) => hit.pageId !== searchPageId),
+    'The deleted page is still returned by keyword search',
+  );
+});
+
+test('search: deleting the space removes its index file', async () => {
+  // The previous test emptied the space, and an empty corpus already removes
+  // the file — so put a page back first. The path under test is a space that
+  // still owns an index file at the moment it is deleted.
+  await api.createPage({
+    spaceId: searchSpaceId,
+    title: '削除の的',
+    body: `識別子 ${SEARCH_TOKEN} を再び含む、スペース削除の検証用ページ。`,
+  });
+  const indexPath = join(process.cwd(), '.keyword-index', `${searchSpaceId}.json`);
+  for (let i = 0; i < 30 && !existsSync(indexPath); i += 1) await setTimeout(500);
+  assert.ok(existsSync(indexPath), 'The index file was not rebuilt for the recreated page');
+
+  await api.deleteSpace(searchSpaceId);
+  for (let i = 0; i < 30 && existsSync(indexPath); i += 1) await setTimeout(500);
+  assert.ok(!existsSync(indexPath), 'The index file survived the space deletion');
 });

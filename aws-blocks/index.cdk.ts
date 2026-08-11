@@ -83,6 +83,27 @@ const corpusBucket = new cdk.aws_s3.Bucket(blocksStack, 'SearchCorpus', {
 corpusBucket.grantReadWrite(blocksStack.handler);
 blocksStack.handler.addEnvironment('SEARCH_CORPUS_BUCKET', corpusBucketName);
 
+// ─── Keyword index bucket name ───────────────────────────────────────────────
+// The keyword-search index lives in the content FileBucket, one object per
+// space under `search-index/`. The runtime reads and writes those objects with
+// the plain S3 SDK rather than the block API, because its freshness check is
+// `HeadObject`+ETag, which the block does not expose. The SDK needs the
+// bucket's physical name; the handler's read/write permission already exists
+// through the block's own grant. The bucket construct is found by walking the
+// tree, like the knowledge base above — matched exhaustively so a second
+// bucket with "content" in its path fails the synth rather than silently
+// receiving the index.
+const contentBuckets = blocksStack.node
+  .findAll()
+  .filter((node): node is cdk.aws_s3.Bucket => node instanceof cdk.aws_s3.Bucket)
+  .filter((bucket) => bucket.node.path.includes('content'));
+if (contentBuckets.length !== 1) {
+  throw new Error(
+    `Expected exactly one content bucket for the keyword index, found ${contentBuckets.length}.`,
+  );
+}
+blocksStack.handler.addEnvironment('KEYWORD_INDEX_BUCKET', contentBuckets[0]!.bucketName);
+
 // ─── Conversation model ──────────────────────────────────────────────────────
 // The Agent block resolves its model where it runs, not where it is synthesized:
 // the CDK side provisions the tables, bucket, queue and WebSocket and never looks

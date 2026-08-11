@@ -142,7 +142,7 @@ const TOOLS: ToolSpec[] = [
   tool({
     name: 'searchWiki',
     description:
-      'Search the Wiki pages by meaning. Call this first when looking into the contents of the Wiki. Only pages the user is allowed to read come back.',
+      'Search the Wiki pages by meaning and by keyword. Call this first when looking into the contents of the Wiki. Only pages the user is allowed to read come back.',
     parameters: z.object({
       query: z.string().describe('What to look for, written as a natural-language sentence'),
       spaceId: z

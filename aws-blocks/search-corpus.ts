@@ -28,10 +28,16 @@
  * internal mock layout, so a change to how a block stores its mock data cannot
  * break search.
  */
-import { DeleteObjectsCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import {
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+import { requestKeywordIndex } from './keyword-index.js';
 import { REINGEST_DEBOUNCE_SECONDS, reingestJob } from './reingest.js';
 import { SEARCH_CORPUS_LOCAL_DIR } from './resources.js';
 
@@ -128,6 +134,34 @@ export async function writeCorpus(spaceId: string, pageId: string, markdown: str
 }
 
 /**
+ * Read one page's corpus document, or `null` when it has none.
+ *
+ * Search results read this to build the excerpt around a keyword hit — the
+ * index stores no positions, so the text is fetched per hit instead. `null`
+ * covers the gap between a page's save and the corpus write it triggers, and
+ * a page deleted since the index was built.
+ */
+export async function readCorpusDocument(spaceId: string, pageId: string): Promise<string | null> {
+  const key = corpusKey(spaceId, pageId);
+  if (onAws) {
+    try {
+      const object = await client().send(
+        new GetObjectCommand({ Bucket: CORPUS_BUCKET, Key: key }),
+      );
+      return (await object.Body?.transformToString('utf8')) ?? null;
+    } catch (error: unknown) {
+      if ((error as { name?: string } | null)?.name === 'NoSuchKey') return null;
+      throw error;
+    }
+  }
+  try {
+    return await readFile(localPath(key), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Remove the corpus documents of several pages in one call.
  *
  * Used by the delete paths, which already hold the set of doomed pages. Bounded
@@ -195,6 +229,11 @@ export async function indexPage(spaceId: string, pageId: string, markdown: strin
     // Derived index — see the note above; the next save re-indexes the page.
   }
   await requestReingest();
+  // The keyword index reads the same corpus, so it goes stale on the same
+  // saves. Unlike re-ingestion this also runs locally: the mock KnowledgeBase
+  // reads the corpus folder directly, but the keyword index file exists only
+  // if its job builds it.
+  await requestKeywordIndex(spaceId);
 }
 
 /**
@@ -213,4 +252,9 @@ export async function unindexPages(
     // Derived index — a lingering ghost is filtered out on read.
   }
   await requestReingest();
+  // One rebuild per touched space; the delete paths stay within one space, so
+  // this is one request in practice.
+  for (const spaceId of new Set(pages.map((page) => page.spaceId))) {
+    await requestKeywordIndex(spaceId);
+  }
 }

@@ -41,3 +41,6 @@ clients/obsidian/test/.cycles.mjs
 # The search corpus derived from page bodies. The folder itself stays, via .gitkeep.
 .search-corpus/*
 !.search-corpus/.gitkeep
+
+# The keyword-search indexes derived from the corpus. Created on demand.
+.keyword-index/

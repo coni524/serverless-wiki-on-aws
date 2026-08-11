@@ -65,6 +65,10 @@ export const ja = {
   searchFailed: (reason: string): string => `検索できませんでした：${reason}`,
   noResults: '一致するページが見つかりませんでした。',
   noResultsHint: '保存したばかりのページは、検索に反映されるまで数分かかることがあります。',
+  /** The suggestion list under the search box. */
+  suggestLoading: '候補を探しています…',
+  suggestEmpty: '候補はありません。',
+  suggestUseQuery: (query: string): string => `「${query}」で検索`,
 
   // ─── Markdown ───
   /** What `<Markdown>` shows on its own, as opposed to `emptyBody` above it. */
@@ -132,6 +136,9 @@ export const en: Page = {
   searchFailed: (reason: string) => `Could not search: ${reason}`,
   noResults: 'No pages matched.',
   noResultsHint: 'A page saved a moment ago can take a few minutes to reach search.',
+  suggestLoading: 'Looking for suggestions…',
+  suggestEmpty: 'No suggestions.',
+  suggestUseQuery: (query: string) => `Search for “${query}”`,
 
   emptyBodyInline: '(no content yet)',
   imageUnavailable: '(image unavailable)',

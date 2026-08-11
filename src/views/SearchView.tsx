@@ -1,4 +1,5 @@
 import { api } from 'aws-blocks';
+import type { ReactNode } from 'react';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Cards from '@cloudscape-design/components/cards';
@@ -11,9 +12,11 @@ import { ErrorText, Loading, useAsync, type SearchItem } from '../lib';
 import { hrefPage, hrefSearch, navigate } from '../router';
 
 /**
- * Semantic search results. The backend collapses chunks to pages,
- * filters them by permission, and attaches live titles before returning, so
- * this view only renders what it is given.
+ * Search results — semantic and keyword hits, fused by the backend into one
+ * list. The backend collapses chunks to pages, filters them by permission,
+ * and attaches live titles and snippets before returning, so this view only
+ * renders what it is given. The one shaping it does: a snippet's `highlights`
+ * ranges — where the keyword search matched — are rendered emboldened.
  */
 export function SearchView({ query, spaceId }: { query: string; spaceId: string | null }) {
   const t = useT();
@@ -84,7 +87,11 @@ export function SearchView({ query, spaceId }: { query: string; spaceId: string 
                 {
                   id: 'snippet',
                   content: (item) =>
-                    item.snippet !== '' ? <Box color="text-body-secondary">{item.snippet}</Box> : null,
+                    item.snippet !== '' ? (
+                      <Box color="text-body-secondary">
+                        <Snippet item={item} />
+                      </Box>
+                    ) : null,
                 },
               ],
             }}
@@ -101,6 +108,19 @@ export function SearchView({ query, spaceId }: { query: string; spaceId: string 
       </SpaceBetween>
     </ContentLayout>
   );
+}
+
+/** The snippet text with its matched ranges emboldened. */
+function Snippet({ item }: { item: SearchItem }) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const [start, end] of item.highlights) {
+    if (start > cursor) parts.push(item.snippet.slice(cursor, start));
+    parts.push(<strong key={start}>{item.snippet.slice(start, end)}</strong>);
+    cursor = end;
+  }
+  parts.push(item.snippet.slice(cursor));
+  return <>{parts}</>;
 }
 
 function ResultLink({ item }: { item: SearchItem }) {
