@@ -30,6 +30,12 @@ AWS（Amazon Web Services）のサーバーレスのサービスで動く Markdo
 - 画面はヘッダーで日本語と英語を切り替えられます
 - インフラは [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks)（Infrastructure-from-Code のフレームワーク）で定義します
 
+## 構成図
+
+![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザ・MCP・同期クライアントの呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、検索と AI 応答で Bedrock を呼ぶ](assets/architecture.png)
+
+*実線の矢印は同期のリクエスト経路を、破線の矢印は非同期・背景の流れを表します。図の元データは [assets/architecture.drawio](assets/architecture.drawio) にあります（図中の文言は英語です）。*
+
 ## 画面
 
 ![スペースの一覧。カード 1 枚が 1 つのスペースで、サインイン中のアカウントが持つ権限を各カードが示す](assets/screenshot-spaces-ja.png)
@@ -187,7 +193,7 @@ serverless-wiki-on-aws/
 │   └── i18n/             # 日本語と英語の辞書
 ├── clients/obsidian/     # Obsidian 同期プラグイン
 ├── test/e2e.test.ts      # API 全体を通す E2E テスト
-├── assets/               # この文書に載せる画面の画像
+├── assets/               # この文書に載せる画面の画像と構成図
 └── README.md             # 英語版のこの文書
 ```
 

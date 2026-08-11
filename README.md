@@ -28,6 +28,12 @@ There are no EC2 instances, containers, or database clusters to keep running: th
 - Japanese and English UI, switched in the header
 - Infrastructure defined with [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks), an Infrastructure-from-Code framework
 
+## Architecture
+
+![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and talks to Bedrock for search and AI replies](assets/architecture.png)
+
+*Solid arrows are the request path; dashed arrows are asynchronous or background flows. The diagram source is [assets/architecture.drawio](assets/architecture.drawio).*
+
 ## Screens
 
 ![The space list, one card per space, each showing the permission the signed-in account holds](assets/screenshot-spaces.png)
@@ -165,7 +171,7 @@ serverless-wiki-on-aws/
 │   └── i18n/             # Japanese and English dictionaries
 ├── clients/obsidian/     # Obsidian sync plugin
 ├── test/e2e.test.ts      # End-to-end test across the whole API
-├── assets/               # Screenshots used by this README
+├── assets/               # Screenshots and the architecture diagram used by this README
 └── README.md             # This file
 ```
 
