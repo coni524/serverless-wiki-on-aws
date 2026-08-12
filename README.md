@@ -44,6 +44,18 @@ There are no EC2 instances, containers, or database clusters to keep running: th
 
 *Search. Results are filtered by the same space permissions before they are returned.*
 
+![A page with the AI assistant open on the right, answering a question from the page content](assets/screenshot-ai-ask.png)
+
+*The AI assistant. It searches the wiki and answers from the pages the signed-in account can read.*
+
+![The review-change view: the Markdown of a new page shown as an all-added diff, with an approval prompt in the assistant panel](assets/screenshot-ai-create.png)
+
+*Asking the assistant to create a page. Nothing is written to the wiki until you approve the change.*
+
+![The review-change view: within the full page body, the removed line in red and the replacement line in green, with the changed characters highlighted](assets/screenshot-ai-diff.png)
+
+*An edit to an existing page appears as a diff before approval.*
+
 ## Prerequisites
 
 - [Node.js 24](https://nodejs.org/) and [pnpm 11](https://pnpm.io/) (npm is not supported; `mise install` picks up both from `mise.toml`)

@@ -46,6 +46,18 @@ AWS（Amazon Web Services）のサーバーレスのサービスで動く Markdo
 
 *検索の結果です。返す前に、Wiki が同じスペース権限で絞り込みます。*
 
+![ページの閲覧画面の右に AI アシスタントの欄が開き、質問への回答を表示している](assets/screenshot-ai-ask.png)
+
+*AI アシスタントです。Wiki を検索し、サインイン中のアカウントが読めるページから答えます。*
+
+![変更の確認画面。新しいページの Markdown 全体を追加行の差分として表示し、AI アシスタントの欄に承認と破棄のボタンが並ぶ](assets/screenshot-ai-create.png)
+
+*AI アシスタントにページの作成を頼んだところです。利用者が承認するまで、AI アシスタントは Wiki に書き込みません。*
+
+![変更の確認画面。本文全体の中で、削除する行を赤、置き換える行を緑で示し、変わった文字をハイライトする](assets/screenshot-ai-diff.png)
+
+*既存ページの編集は、承認の前に差分で確かめられます。*
+
 ## 前提
 
 - [Node.js 24](https://nodejs.org/) と [pnpm 11](https://pnpm.io/)（npm は使いません。`mise install` が `mise.toml` から両方を入れます）
