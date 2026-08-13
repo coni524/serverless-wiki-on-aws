@@ -6,6 +6,25 @@
    needs but AppLayout does not provide: row controls that appear under the
    pointer, and an edge that can be dragged. */
 
+/* The top bar (the `TopBar` of src/app/App.tsx).
+
+   The bar is a sibling of `AppLayout`, so the document scrolls it away with
+   everything else unless it is told to stay. `sticky` rather than `fixed`
+   because the bar keeps its place in the flow that way: `AppLayout` reads its
+   height through `headerSelector` and starts its panels below it, and taking the
+   bar out of the flow would leave that band empty and slide the content up
+   under it.
+
+   The stacking order is Cloudscape's own: its layout draws the navigation panel
+   and the drawers in the 800s, and the resizer below sits at 840, so a bar that
+   is to pass over all of them has to be above that range. 1002 is the value
+   Cloudscape uses for this bar in its own examples. */
+#top-navigation {
+  position: sticky;
+  top: 0;
+  z-index: 1002;
+}
+
 /* The navigation panel's header row (src/components/SpaceNavigation.tsx).
 
    Three controls sit on this line and only two of them are in the row: the
