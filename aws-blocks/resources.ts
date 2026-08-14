@@ -51,8 +51,10 @@ export const scope = new Scope('sl-wiki');
 // setup challenge itself, which the auth block's `<Authenticator>` renders.
 //
 // Note this does not apply to sessions that already exist: they carry a refresh
-// token, and a refresh is not a sign-in. Turning this on means dropping the
-// records in the session table (`docs/runbooks/enable-mfa.md`).
+// token, and a refresh is not a sign-in, so Cognito never puts a factor in
+// front of one. Turning this on over a pool that is already in use therefore
+// takes one more step from the operator — delete every record in the auth
+// session table, which sends each user back through a real sign-in.
 export const auth = new AuthCognito(scope, 'auth', {
   signInWith: 'email',
   selfSignUp: false,
