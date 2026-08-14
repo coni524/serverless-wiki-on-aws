@@ -11,7 +11,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useDateTimeFormat, useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
 import { errMessage } from '@/utils/errors';
-import { freshnessAgrees, resetServerState, usePage } from '@/features/pages/api/page-cache';
+import { freshnessAgrees, noteSavedPage, usePage } from '@/features/pages/api/page-cache';
 import { hrefHome, hrefNode, hrefPage, hrefSpace, navigate } from '@/lib/router';
 import { collectAttachmentRefs } from '@/lib/markdown';
 import { cachedImageUrls, revokeImageUrls } from '@/features/pages/api/attachment-cache';
@@ -88,11 +88,20 @@ export function PageView({
     setBusy(true);
     setActionError(null);
     try {
-      await api.updatePage(pageId, { title: nextTitle, body });
-      // The saved page is not the only stale entry: a rename moves the titles
-      // in other pages' breadcrumbs and in the tree's labels too. Dropping
-      // everything is the rule; the reset refetches this page and the tree.
-      resetServerState();
+      const saved = await api.updatePage(pageId, { title: nextTitle, body });
+      // The text in front of the writer is the text the server now holds, and
+      // the answer carries the stamp it was written under — so it is handed to
+      // the cache rather than thrown away and read back. The tree label follows
+      // from the same call: a save may have renamed the page.
+      noteSavedPage({
+        spaceId,
+        pageId,
+        parentPageId: page.breadcrumb.at(-1)?.pageId ?? null,
+        title: saved.title,
+        body,
+        revision: saved.revision,
+        updatedAt: saved.updatedAt,
+      });
       setMode('view');
     } catch (e) {
       setActionError(errMessage(e));
@@ -206,10 +215,11 @@ function PageBody({ pageId, body }: { pageId: string; body: string }) {
   const [images, setImages] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Written out rather than run through `useAsync`, because the object URLs the
-  // cache hands back are owned by this effect: every one of them has to be
-  // revoked when the body changes or the view unmounts, including the ones
-  // produced by a request that finished after this effect was already torn down.
+  // An effect rather than a query, because the object URLs the cache hands back
+  // are owned by this effect: every one of them has to be revoked when the body
+  // changes or the view unmounts, including the ones produced by a request that
+  // finished after this effect was already torn down. A cache entry has no such
+  // teardown, and what it held would be a URL to freed bytes.
   useEffect(() => {
     let live = true;
     let held: Record<string, string> | null = null;

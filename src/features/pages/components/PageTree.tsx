@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from 'aws-blocks';
-import { useQueries, useQueryClient } from '@tanstack/react-query';
+import { useQueries } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
@@ -17,7 +17,15 @@ import { PAGE_HAS_CHILDREN_ERROR, errMessage, errName } from '@/utils/errors';
 import { isTypedKey } from '@/utils/ime';
 import type { NodeKind, Page } from '@/types/api';
 import { sortSiblings } from '@/features/pages/utils/sort';
-import { ROOT_LEVEL, noteFreshness, treeLevelKey } from '@/features/pages/api/page-cache';
+import {
+  ROOT_LEVEL,
+  loadMoreTreeLevel,
+  noteCreatedNode,
+  noteDeletedNode,
+  noteRenamedNode,
+  treeLevelQuery,
+  type Level,
+} from '@/features/pages/api/page-cache';
 import { useT } from '@/lib/i18n';
 import { hrefNode, hrefSpace, navigate } from '@/lib/router';
 
@@ -76,9 +84,6 @@ const HORIZONTAL_ELLIPSIS = (
   </svg>
 );
 
-/** One level of children, as far as it has been fetched. */
-type Level = { items: Page[]; cursor: string | null };
-
 /**
  * What is about to be created and where. `parentPageId` is `null` for the space
  * root, and it always names a folder otherwise: a page cannot hold children,
@@ -130,9 +135,9 @@ type Deletion = {
  *
  * Three things the shell once told this component apart by remounting it are now
  * separate: the space is the tree's identity and stays on the `key`, the current
- * page arrives as `expandPath`, and staleness arrives through the query cache —
- * a structural edit resets the tree-level queries, and the levels on screen
- * fetch themselves again while the expanded set stays put.
+ * page arrives as `expandPath`, and an edit made here is applied to the query
+ * cache — the row that was renamed is relabelled and the row that was deleted
+ * leaves, with everything else on screen left exactly as it stands.
  */
 export function PageTree({
   spaceId,
@@ -143,7 +148,6 @@ export function PageTree({
   onNewNode,
   onNewNodeEnd,
   onCreated,
-  onChanged,
 }: {
   spaceId: string;
   currentPageId: string | null;
@@ -155,11 +159,8 @@ export function PageTree({
   onNewNode: (target: NewNodeTarget) => void;
   onNewNodeEnd: () => void;
   onCreated: (nodeId: string, kind: NodeKind) => void;
-  /** A rename or a delete landed: the tree and the open page are both stale. */
-  onChanged: () => void;
 }) {
   const t = useT();
-  const queryClient = useQueryClient();
   // The levels this tree is drawing, discovered by the render before this one
   // (`build` collects them). Each key is one query below; a level that folds
   // out of view drops off this list and its query unmounts, data intact.
@@ -202,20 +203,11 @@ export function PageTree({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Deletion | null>(null);
 
-  // One query per level on screen. The queryFn notes each row's stamp — every
-  // row carries the revision and the update time already, and recording them is
-  // what lets the page view decide, with no request of its own, whether the
-  // body it holds is still the current one. Refetch dedup and the discard of
-  // answers that outlive a reset are Query's own bookkeeping now.
+  // One query per level on screen, shared with the folder screen — both ask the
+  // same parent for the same listing (`treeLevelQuery`). Refetch dedup and the
+  // discard of answers that outlive a refetch are Query's own bookkeeping now.
   const levelResults = useQueries({
-    queries: levelKeys.map((key) => ({
-      queryKey: treeLevelKey(spaceId, key === ROOT ? null : key),
-      queryFn: async (): Promise<Level> => {
-        const result = await api.listChildPages(spaceId, key === ROOT ? null : key);
-        noteFreshness(result.items);
-        return { items: result.items, cursor: result.nextCursor };
-      },
-    })),
+    queries: levelKeys.map((key) => treeLevelQuery(spaceId, key === ROOT ? null : key)),
   });
   const levels = new Map<string, { data: Level | undefined; error: string | undefined }>();
   levelKeys.forEach((key, index) => {
@@ -226,22 +218,11 @@ export function PageTree({
     });
   });
 
-  /**
-   * Fetch the next slice of a long level and append it to the level's query
-   * data. Refetches of the level start over from the first slice, which is what
-   * the old refresh did too: a continuation is a reading position, not state
-   * worth defending against a reset.
-   */
+  /** Fetch the next slice of a long level, and report where it failed if it did. */
   const loadMore = async (parentPageId: string | null, cursor: string) => {
     const key = parentPageId ?? ROOT;
     try {
-      const result = await api.listChildPages(spaceId, parentPageId, cursor);
-      noteFreshness(result.items);
-      queryClient.setQueryData<Level>(treeLevelKey(spaceId, parentPageId), (prev) =>
-        prev === undefined
-          ? { items: result.items, cursor: result.nextCursor }
-          : { items: [...prev.items, ...result.items], cursor: result.nextCursor },
-      );
+      await loadMoreTreeLevel(spaceId, parentPageId, cursor);
       setMoreErrors(({ [key]: _dropped, ...rest }) => rest);
     } catch (e) {
       setMoreErrors((prev) => ({ ...prev, [key]: errMessage(e) }));
@@ -305,6 +286,7 @@ export function PageTree({
           ? (await api.createFolder(input)).folderId
           : (await api.createPage(input)).pageId;
       onNewNodeEnd();
+      noteCreatedNode(spaceId, parentPageId);
       onCreated(created, kind);
     } catch (e) {
       setDraftError(errMessage(e));
@@ -313,7 +295,7 @@ export function PageTree({
     }
   };
 
-  const rename = async (page: Page) => {
+  const rename = async (page: Page, parentPageId: string | null) => {
     const title = draft.trim();
     if (title === '' || draftBusy) return;
     setDraftBusy(true);
@@ -325,8 +307,9 @@ export function PageTree({
       else await api.updatePage(page.pageId, { title });
       setRenaming(null);
       // Not just the tree label: the open page carries the same title in its
-      // heading and its breadcrumb, and it was fetched before this call.
-      onChanged();
+      // heading, and the pages under a renamed folder carry it in their
+      // breadcrumbs.
+      noteRenamedNode({ spaceId, pageId: page.pageId, parentPageId, title });
     } catch (e) {
       setDraftError(errMessage(e));
     } finally {
@@ -344,8 +327,10 @@ export function PageTree({
       setDeleting(null);
       // The node that was open may be the one just deleted, or a descendant of
       // it that went with a cascade. Either way its route is now a dead end, so
-      // leave for the parent before the refetch finds nothing. A parent that is
-      // drawn in this tree is a folder: nothing else is unfolded.
+      // leave for the parent — and leave *before* the cache drops what that
+      // route was showing, or the view would spend a frame asking for a node
+      // that is gone. A parent that is drawn in this tree is a folder: nothing
+      // else is unfolded.
       if (target.pageId === currentPageId || expandPath.includes(target.pageId)) {
         navigate(
           target.parentPageId === null
@@ -353,7 +338,12 @@ export function PageTree({
             : hrefNode(spaceId, target.parentPageId, 'folder'),
         );
       }
-      onChanged();
+      noteDeletedNode({
+        spaceId,
+        pageId: target.pageId,
+        parentPageId: target.parentPageId,
+        children,
+      });
     } catch (e) {
       // The API refuses a node that still holds children with a structured error
       // name; turn that into an explicit choice rather than a dead end. The name
@@ -585,7 +575,7 @@ export function PageTree({
               icon,
               content: titleInput(
                 t.space.titlePlaceholder(nodeKind),
-                () => void rename(node.page),
+                () => void rename(node.page, node.parentPageId),
               ),
               announcementLabel: t.space.renameAnnouncement(title),
             };

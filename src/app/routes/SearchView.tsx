@@ -1,5 +1,5 @@
-import { api } from 'aws-blocks';
 import type { ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Cards from '@cloudscape-design/components/cards';
@@ -9,7 +9,9 @@ import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
-import { useAsync } from '@/hooks/use-async';
+import { errMessage } from '@/utils/errors';
+import { searchQuery } from '@/features/search/api/search';
+import { spaceQuery } from '@/features/spaces/api/space-cache';
 import type { SearchItem } from '@/types/api';
 import { hrefPage, hrefSearch, navigate } from '@/lib/router';
 
@@ -23,20 +25,16 @@ import { hrefPage, hrefSearch, navigate } from '@/lib/router';
 export function SearchView({ query, spaceId }: { query: string; spaceId: string | null }) {
   const t = useT();
   const q = query.trim();
-  const { data, error, loading, reload } = useAsync(
-    () =>
-      q === ''
-        ? Promise.resolve({ items: [] as SearchItem[] })
-        : api.search(q, spaceId === null ? undefined : { spaceId }),
-    [q, spaceId],
-  );
+  const { data, error, isPending, isFetching, refetch } = useQuery(searchQuery(q, spaceId));
 
   // Result rows carry their space name; only the scope line above the list
-  // needs a lookup, and only when the search is confined to one space.
-  const { data: scopeSpace } = useAsync(
-    () => (spaceId === null ? Promise.resolve(null) : api.getSpace(spaceId)),
-    [spaceId],
-  );
+  // needs a lookup, and only when the search is confined to one space — and
+  // then it is the same entry the space screen reads, so a search run from
+  // inside a space names it without asking again.
+  const { data: scopeSpace } = useQuery({
+    ...spaceQuery(spaceId ?? ''),
+    enabled: spaceId !== null,
+  });
 
   return (
     <ContentLayout
@@ -54,8 +52,9 @@ export function SearchView({ query, spaceId }: { query: string; spaceId: string 
           actions={
             q !== '' ? (
               // The hash does not change on a same-query resubmit, so this is
-              // the way to retry while waiting out the re-ingestion delay.
-              <Button iconName="refresh" onClick={reload}>
+              // the way to retry while waiting out the re-ingestion delay. The
+              // results already found stay on screen while it runs.
+              <Button iconName="refresh" loading={isFetching} onClick={() => void refetch()}>
                 {t.page.searchAgain}
               </Button>
             ) : undefined
@@ -67,10 +66,10 @@ export function SearchView({ query, spaceId }: { query: string; spaceId: string 
     >
       <SpaceBetween size="m">
         {q === '' && <Box color="text-status-inactive">{t.page.searchPrompt}</Box>}
-        {q !== '' && loading && <Loading label={t.page.searching} />}
-        {error !== null && <ErrorText>{t.page.searchFailed(error)}</ErrorText>}
+        {q !== '' && isPending && <Loading label={t.page.searching} />}
+        {error !== null && <ErrorText>{t.page.searchFailed(errMessage(error))}</ErrorText>}
 
-        {q !== '' && !loading && error === null && data !== null && (
+        {q !== '' && !isPending && error === null && data !== undefined && (
           <Cards
             items={data.items}
             trackBy={(item) => `${item.spaceId}/${item.pageId}`}

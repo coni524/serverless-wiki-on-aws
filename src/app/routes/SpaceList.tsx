@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -16,14 +17,19 @@ import { useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
 import { errMessage } from '@/utils/errors';
 import { isTypedKey } from '@/utils/ime';
-import { useAsync } from '@/hooks/use-async';
 import type { Me, Space } from '@/types/api';
+import { mySpacesQuery, noteCreatedSpace } from '@/features/spaces/api/space-cache';
 import { hrefSpace, navigate } from '@/lib/router';
 
-/** The landing view: the spaces the signed-in user can read. */
+/**
+ * The landing view: the spaces the signed-in user can read.
+ *
+ * The listing is the same entry the navigation panel's space switcher reads, so
+ * whichever screen fetched it, both are showing it.
+ */
 export function SpaceList({ me }: { me: Me }) {
   const t = useT();
-  const { data, error, loading, reload } = useAsync(() => api.mySpaces(), []);
+  const { data, error, isPending, isFetching, refetch } = useQuery(mySpacesQuery());
   const [creating, setCreating] = useState(false);
 
   return (
@@ -33,7 +39,12 @@ export function SpaceList({ me }: { me: Me }) {
           variant="h1"
           actions={
             <SpaceBetween size="xs" direction="horizontal">
-              <Button iconName="refresh" ariaLabel={t.space.reload} onClick={reload} />
+              <Button
+                iconName="refresh"
+                ariaLabel={t.space.reload}
+                loading={isFetching}
+                onClick={() => void refetch()}
+              />
               {me.isGlobalAdmin && (
                 <Button variant="primary" onClick={() => setCreating(true)}>
                   {t.space.createSpace}
@@ -47,10 +58,10 @@ export function SpaceList({ me }: { me: Me }) {
       }
     >
       <SpaceBetween size="m">
-        {loading && <Loading />}
-        {error !== null && <ErrorText>{error}</ErrorText>}
+        {isPending && <Loading />}
+        {error !== null && <ErrorText>{errMessage(error)}</ErrorText>}
 
-        {data !== null && (
+        {data !== undefined && (
           <Cards
             items={data}
             trackBy={(space) => space.spaceId}
@@ -116,6 +127,9 @@ function CreateSpace({ onDismiss }: { onDismiss: () => void }) {
         name: name.trim(),
         description: description.trim(),
       });
+      // The reader is taken into the new space, so the listing behind them is
+      // refetched rather than left as it was for their way back.
+      noteCreatedSpace();
       navigate(hrefSpace(spaceId));
     } catch (e) {
       setError(errMessage(e));

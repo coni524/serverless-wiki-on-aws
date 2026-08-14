@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Alert from '@cloudscape-design/components/alert';
 import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
@@ -13,6 +13,7 @@ import { useT } from '@/lib/i18n';
 import { errMessage } from '@/utils/errors';
 import { isTypedKey } from '@/utils/ime';
 import type { DirectoryUser, Group } from '@/types/api';
+import { directoryQuery, loadMoreUsers } from '@/features/admin/api/admin-cache';
 
 /**
  * Pieces the four management screens share.
@@ -204,50 +205,38 @@ export interface Directory {
 /**
  * Accounts known to the Wiki, filtered by the start of the address.
  *
- * Paging is keyset (`findUsers` settled that contract): each page carries the
- * cursor for the next, and pages are appended rather than replaced, so the
- * screen grows downward instead of flipping. A run counter discards a response
- * that lands after the prefix changed — the reply to an abandoned filter must
- * never overwrite the current one.
+ * Each prefix is its own entry, so a filter typed once is drawn from the cache
+ * when it is typed again, and a reply to an abandoned filter cannot overwrite
+ * the current one — it lands in the entry it was asked for.
+ *
+ * The continuation runs outside the query, as it does in the page tree: a page
+ * that fails to load is reported on its own rather than replacing the rows
+ * already read, and appending is what keeps the screen growing downward
+ * instead of flipping.
  */
 export function useDirectory(prefix: string): Directory {
-  const [users, setUsers] = useState<DirectoryUser[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const run = useRef(0);
+  const { data, error, isFetching, refetch } = useQuery(directoryQuery(prefix));
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
 
-  const fetchPage = useCallback(
-    (from: string | null) => {
-      const token = ++run.current;
-      setLoading(true);
-      setError(null);
-      api
-        .findUsers(prefix === '' ? null : prefix, from)
-        .then((result) => {
-          if (token !== run.current) return;
-          setUsers((previous) => (from === null ? result.users : [...previous, ...result.users]));
-          setCursor(result.nextCursor);
-          setLoading(false);
-        })
-        .catch((e) => {
-          if (token !== run.current) return;
-          setError(errMessage(e));
-          setLoading(false);
-        });
-    },
-    [prefix],
-  );
+  const cursor = data?.nextCursor ?? null;
 
-  useEffect(() => fetchPage(null), [fetchPage]);
+  const loadMore = () => {
+    if (cursor === null) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    loadMoreUsers(prefix, cursor)
+      .catch((e: unknown) => setMoreError(errMessage(e)))
+      .finally(() => setLoadingMore(false));
+  };
 
   return {
-    users,
+    users: data?.users ?? [],
     cursor,
-    loading,
-    error,
-    loadMore: () => fetchPage(cursor),
-    reload: () => fetchPage(null),
+    loading: isFetching || loadingMore,
+    error: moreError ?? (error === null ? null : errMessage(error)),
+    loadMore,
+    reload: () => void refetch(),
   };
 }
 

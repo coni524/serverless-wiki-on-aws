@@ -1,11 +1,11 @@
 import type { CSSProperties } from 'react';
-import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import Drawer from '@cloudscape-design/components/drawer';
 import { colorBorderDividerDefault } from '@cloudscape-design/design-tokens';
 import { useT } from '@/lib/i18n';
 import { canWrite } from '@/features/spaces/utils/permissions';
-import { useAsync } from '@/hooks/use-async';
+import { mySpacesQuery } from '@/features/spaces/api/space-cache';
 import type { NodeKind, Space } from '@/types/api';
 import { hrefHome, hrefSpace, navigate } from '@/lib/router';
 import { PageTree, type NewNodeTarget } from '@/features/pages/components/PageTree';
@@ -28,7 +28,9 @@ const FILTER_FROM = 8;
  * why: the switcher needs every space the reader can reach, and that listing
  * carries the permission held on each, so the current space's name
  * and the reader's write permission come out of the same request. It is one
- * request either way — `getSpace` is what it replaces.
+ * request either way — `getSpace` is what it replaces. The listing is the space
+ * list screen's entry too, so opening a space draws the switcher from what that
+ * screen already fetched.
  *
  * The title input opens inside the tree, so which row it belongs to is state
  * the shell holds — the header's plus aims it at the root, a row's plus aims it
@@ -61,7 +63,6 @@ export function SpaceNavigation({
   onNewNode,
   onNewNodeEnd,
   onCreated,
-  onChanged,
 }: {
   spaceId: string;
   currentPageId: string | null;
@@ -71,10 +72,9 @@ export function SpaceNavigation({
   onNewNode: (target: NewNodeTarget) => void;
   onNewNodeEnd: () => void;
   onCreated: (nodeId: string, kind: NodeKind) => void;
-  onChanged: () => void;
 }) {
   const t = useT();
-  const { data: spaces } = useAsync(() => api.mySpaces(), []);
+  const { data: spaces } = useQuery(mySpacesQuery());
   const current = spaces?.find((space) => space.spaceId === spaceId) ?? null;
 
   const editable = current !== null && canWrite(current.permission);
@@ -115,7 +115,6 @@ export function SpaceNavigation({
         onNewNode={onNewNode}
         onNewNodeEnd={onNewNodeEnd}
         onCreated={onCreated}
-        onChanged={onChanged}
       />
     </Drawer>
   );
@@ -136,11 +135,17 @@ export function SpaceNavigation({
  * for the router; without the `href` the entries would be dead to the middle
  * button.
  *
- * The name is `null` for as long as the request is in flight, and the button
+ * The name is unknown for as long as the request is in flight, and the button
  * shows the generic space label until it lands. It is not disabled while it
  * waits: the entry it needs least is the one for the space already open.
  */
-function SpaceSwitcher({ spaces, current }: { spaces: Space[] | null; current: Space | null }) {
+function SpaceSwitcher({
+  spaces,
+  current,
+}: {
+  spaces: Space[] | undefined;
+  current: Space | null;
+}) {
   const t = useT();
   // Name only. A space's description belongs to the screen that lists them,
   // where there is width for it; here it would push the names apart in a panel
@@ -155,7 +160,7 @@ function SpaceSwitcher({ spaces, current }: { spaces: Space[] | null; current: S
     <ButtonDropdown
       ariaLabel={t.space.switchSpace}
       expandToViewport
-      loading={spaces === null}
+      loading={spaces === undefined}
       loadingText={t.common.loading}
       filteringType={items.length >= FILTER_FROM ? 'auto' : 'none'}
       filteringPlaceholder={t.space.searchSpaces}

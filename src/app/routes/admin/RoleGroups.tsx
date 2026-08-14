@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import FormField from '@cloudscape-design/components/form-field';
@@ -11,8 +12,18 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Table from '@cloudscape-design/components/table';
 import { useT, type Messages } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
-import { useAsync } from '@/hooks/use-async';
+import { errMessage } from '@/utils/errors';
 import type { AdminSpace, GrantLevel, Group } from '@/types/api';
+import {
+  adminSpacesQuery,
+  attachedUserGroupsQuery,
+  grantsQuery,
+  noteGrantsChanged,
+  noteGroupsChanged,
+  refreshAdmin,
+  roleGroupsQuery,
+  userGroupsQuery,
+} from '@/features/admin/api/admin-cache';
 import { followRoute, hrefAdmin, hrefAdminRoleGroup, hrefAdminUserGroup, navigate } from '@/lib/router';
 import { ActionError, ConfirmModal, CreateGroupModal, GroupBadges, useAction } from '@/features/admin/components/parts';
 
@@ -42,7 +53,7 @@ const optionFor = (options: PermissionOption[], permission: GrantLevel) =>
 
 export function RoleGroupList() {
   const t = useT();
-  const { data, error, loading, reload } = useAsync(() => api.listRoleGroups(), []);
+  const { data, error, isPending, isFetching, refetch } = useQuery(roleGroupsQuery());
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Group | null>(null);
   const action = useAction();
@@ -50,18 +61,23 @@ export function RoleGroupList() {
   return (
     <SpaceBetween size="m">
       <ActionError action={action} />
-      {error !== null && <ErrorText>{error}</ErrorText>}
+      {error !== null && <ErrorText>{errMessage(error)}</ErrorText>}
 
       <Table
         variant="container"
         header={
           <Header
             variant="h2"
-            counter={data === null ? undefined : `(${data.length})`}
+            counter={data === undefined ? undefined : `(${data.length})`}
             description={t.admin.roleGroups.listDescription}
             actions={
               <SpaceBetween size="xs" direction="horizontal">
-                <Button iconName="refresh" ariaLabel={t.admin.shared.reload} onClick={reload} />
+                <Button
+                  iconName="refresh"
+                  ariaLabel={t.admin.shared.reload}
+                  loading={isFetching}
+                  onClick={() => void refetch()}
+                />
                 <Button variant="primary" onClick={() => setCreating(true)}>
                   {t.common.create}
                 </Button>
@@ -73,7 +89,7 @@ export function RoleGroupList() {
         }
         items={data ?? []}
         trackBy={(group) => group.id}
-        loading={loading}
+        loading={isPending}
         loadingText={t.admin.roleGroups.loading}
         columnDefinitions={[
           {
@@ -122,6 +138,7 @@ export function RoleGroupList() {
           nameLabel={t.admin.roleGroups.nameLabel}
           onCreate={async (input) => {
             const { roleGroupId } = await api.createRoleGroup(input);
+            noteGroupsChanged();
             navigate(hrefAdminRoleGroup(roleGroupId));
           }}
           onDismiss={() => setCreating(false)}
@@ -135,7 +152,7 @@ export function RoleGroupList() {
           onConfirm={() =>
             action.run(() => api.deleteRoleGroup(deleting.id), () => {
               setDeleting(null);
-              reload();
+              noteGroupsChanged();
             })
           }
           onDismiss={() => setDeleting(null)}
@@ -150,36 +167,44 @@ export function RoleGroupList() {
 /** One role group: the spaces it grants, and the user groups it reaches. */
 export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
   const t = useT();
-  const { data, error, loading, reload } = useAsync(async () => {
-    const [roleGroups, grants, spaces, attachedTo, userGroups] = await Promise.all([
-      api.listRoleGroups(),
-      api.listRoleGroupGrants(roleGroupId),
-      api.listSpaces(),
-      api.listRoleGroupUserGroups(roleGroupId),
-      api.listUserGroups(),
-    ]);
-    return {
-      group: roleGroups.find((item) => item.id === roleGroupId) ?? null,
-      grants,
-      spaces,
-      attachedTo,
-      userGroups,
-    };
-  }, [roleGroupId]);
+  // Five entries, four of them shared with the other management screens: the
+  // two group listings, every space, and the attachment edge this screen shows
+  // from the role group's side. Changing a grant refetches the grants alone.
+  const roleGroups = useQuery(roleGroupsQuery());
+  const grants = useQuery(grantsQuery(roleGroupId));
+  const spaces = useQuery(adminSpacesQuery());
+  const attachedTo = useQuery(attachedUserGroupsQuery(roleGroupId));
+  const userGroups = useQuery(userGroupsQuery());
 
   const action = useAction();
   const [granting, setGranting] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  if (loading) return <Loading label={t.admin.roleGroups.loading} />;
-  if (error !== null) return <ErrorText>{error}</ErrorText>;
-  if (data === null) return null;
-  if (data.group === null) return <ErrorText>{t.admin.roleGroups.notFound}</ErrorText>;
+  const error =
+    roleGroups.error ?? grants.error ?? spaces.error ?? attachedTo.error ?? userGroups.error;
+  if (error !== null) return <ErrorText>{errMessage(error)}</ErrorText>;
 
-  const group = data.group;
-  const rows = data.grants.map((grant) => ({
+  const roleGroupList = roleGroups.data;
+  const grantList = grants.data;
+  const spaceList = spaces.data;
+  const attachedList = attachedTo.data;
+  const userGroupList = userGroups.data;
+  if (
+    roleGroupList === undefined ||
+    grantList === undefined ||
+    spaceList === undefined ||
+    attachedList === undefined ||
+    userGroupList === undefined
+  ) {
+    return <Loading label={t.admin.roleGroups.loading} />;
+  }
+
+  const group = roleGroupList.find((item) => item.id === roleGroupId) ?? null;
+  if (group === null) return <ErrorText>{t.admin.roleGroups.notFound}</ErrorText>;
+
+  const rows = grantList.map((grant) => ({
     ...grant,
-    space: data.spaces.find((item) => item.spaceId === grant.spaceId) ?? null,
+    space: spaceList.find((item) => item.spaceId === grant.spaceId) ?? null,
   }));
   // Built once so the picker's selected option is the very object the dropdown
   // holds, rather than an equal one built a second time per row.
@@ -192,7 +217,11 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
         description={group.description}
         actions={
           <SpaceBetween size="xs" direction="horizontal">
-            <Button iconName="refresh" ariaLabel={t.admin.shared.reload} onClick={reload} />
+            <Button
+              iconName="refresh"
+              ariaLabel={t.admin.shared.reload}
+              onClick={refreshAdmin}
+            />
             <Button disabled={group.system} onClick={() => setDeleting(true)}>
               {t.common.delete}
             </Button>
@@ -252,9 +281,8 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
                   if (next === row.permission) return;
                   // Re-granting the same pair overwrites the level, so changing
                   // the picker is the whole edit — there is no separate update.
-                  action.run(
-                    () => api.grantSpaceToRoleGroup(row.spaceId, roleGroupId, next),
-                    reload,
+                  action.run(() => api.grantSpaceToRoleGroup(row.spaceId, roleGroupId, next), () =>
+                    noteGrantsChanged(roleGroupId),
                   );
                 }}
               />
@@ -269,9 +297,8 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
                 variant="inline-link"
                 disabled={action.busy}
                 onClick={() =>
-                  action.run(
-                    () => api.revokeSpaceFromRoleGroup(row.spaceId, roleGroupId),
-                    reload,
+                  action.run(() => api.revokeSpaceFromRoleGroup(row.spaceId, roleGroupId), () =>
+                    noteGrantsChanged(roleGroupId),
                   )
                 }
               >
@@ -292,13 +319,13 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
         header={
           <Header
             variant="h2"
-            counter={`(${data.attachedTo.length})`}
+            counter={`(${attachedList.length})`}
             description={t.admin.roleGroups.attachedDescription}
           >
             {t.admin.roleGroups.attachedHeader}
           </Header>
         }
-        items={data.attachedTo}
+        items={attachedList}
         trackBy={(row) => row.userGroupId}
         columnDefinitions={[
           {
@@ -307,7 +334,7 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
             isRowHeader: true,
             cell: (row) => (
               <Link href={hrefAdminUserGroup(row.userGroupId)} onFollow={followRoute}>
-                {data.userGroups.find((item) => item.id === row.userGroupId)?.name ?? row.userGroupId}
+                {userGroupList.find((item) => item.id === row.userGroupId)?.name ?? row.userGroupId}
               </Link>
             ),
           },
@@ -322,10 +349,9 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
       {granting && (
         <GrantSpace
           roleGroupId={roleGroupId}
-          spaces={data.spaces.filter(
-            (space) => !data.grants.some((grant) => grant.spaceId === space.spaceId),
+          spaces={spaceList.filter(
+            (space) => !grantList.some((grant) => grant.spaceId === space.spaceId),
           )}
-          onDone={reload}
           onDismiss={() => setGranting(false)}
         />
       )}
@@ -335,14 +361,15 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
           header={t.admin.shared.deleteHeader(group.name)}
           action={action}
           onConfirm={() =>
-            action.run(() => api.deleteRoleGroup(roleGroupId), () =>
-              navigate(hrefAdmin('role-groups')),
-            )
+            action.run(() => api.deleteRoleGroup(roleGroupId), () => {
+              noteGroupsChanged();
+              navigate(hrefAdmin('role-groups'));
+            })
           }
           onDismiss={() => setDeleting(false)}
         >
           <Box>
-            {t.admin.roleGroups.deleteDetailBody(data.grants.length, data.attachedTo.length)}
+            {t.admin.roleGroups.deleteDetailBody(grantList.length, attachedList.length)}
           </Box>
         </ConfirmModal>
       )}
@@ -354,12 +381,10 @@ export function RoleGroupDetail({ roleGroupId }: { roleGroupId: string }) {
 function GrantSpace({
   roleGroupId,
   spaces,
-  onDone,
   onDismiss,
 }: {
   roleGroupId: string;
   spaces: AdminSpace[];
-  onDone: () => void;
   onDismiss: () => void;
 }) {
   const t = useT();
@@ -390,7 +415,7 @@ function GrantSpace({
                 action.run(
                   () => api.grantSpaceToRoleGroup(spaceId ?? '', roleGroupId, permission),
                   () => {
-                    onDone();
+                    noteGrantsChanged(roleGroupId);
                     onDismiss();
                   },
                 )

@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import {
   colorBackgroundStatusError,
   colorBackgroundStatusSuccess,
@@ -15,9 +15,10 @@ import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { ErrorText, Loading } from '@/components/ui';
-import { useAsync } from '@/hooks/use-async';
+import { errMessage } from '@/utils/errors';
 import type { PageDetail } from '@/types/api';
-import { fetchPage } from '@/features/pages/api/page-cache';
+import { pageQuery } from '@/features/pages/api/page-cache';
+import { spaceQuery } from '@/features/spaces/api/space-cache';
 // The one repair the write path applies to a model-composed body, reached from
 // the browser so this card shows the text that would actually be stored. See
 // `aws-blocks/model-text.ts` for why the rule lives in one place.
@@ -111,17 +112,11 @@ function CreateChange({ input }: { input: Record<string, unknown> }) {
   const spaceId = str(input.spaceId);
   const parentPageId = str(input.parentPageId);
 
-  const space = useAsync(
-    () => (spaceId === '' ? Promise.resolve(null) : api.getSpace(spaceId)),
-    [spaceId],
-  );
+  const space = useQuery({ ...spaceQuery(spaceId), enabled: spaceId !== '' });
   // Through the cache like every other read, even though only the title is used
   // here: the parent is a page the user just had open in the tree, so its stamp
   // is held and the server skips the S3 read.
-  const parent = useAsync(
-    () => (parentPageId === '' ? Promise.resolve(null) : fetchPage(parentPageId)),
-    [parentPageId],
-  );
+  const parent = useQuery({ ...pageQuery(parentPageId), enabled: parentPageId !== '' });
 
   return (
     <Container
@@ -146,13 +141,12 @@ function UpdateChange({ input }: { input: Record<string, unknown> }) {
   // Through the cache, so the stamp is sent and an unchanged body is not
   // re-read from S3. This still asks the server every time — a diff shown
   // against a body nobody confirmed would be worse than a slow one.
-  const page = useAsync(() => fetchPage(pageId), [pageId]);
+  const page = useQuery(pageQuery(pageId));
 
-  if (page.loading) return <Loading label={t.assistant.loadingCurrent} />;
   if (page.error !== null) {
-    return <ErrorText>{t.assistant.loadCurrentFailed(page.error)}</ErrorText>;
+    return <ErrorText>{t.assistant.loadCurrentFailed(errMessage(page.error))}</ErrorText>;
   }
-  if (page.data === null) return null;
+  if (page.data === undefined) return <Loading label={t.assistant.loadingCurrent} />;
 
   const current = page.data;
   // An omitted field means "leave it alone", so the current value stands in.
@@ -195,13 +189,12 @@ function DeleteChange({ input }: { input: Record<string, unknown> }) {
   // Through the cache, so the stamp is sent and an unchanged body is not
   // re-read from S3. This still asks the server every time — a diff shown
   // against a body nobody confirmed would be worse than a slow one.
-  const page = useAsync(() => fetchPage(pageId), [pageId]);
+  const page = useQuery(pageQuery(pageId));
 
-  if (page.loading) return <Loading label={t.assistant.loadingTarget} />;
   if (page.error !== null) {
-    return <ErrorText>{t.assistant.loadTargetFailed(page.error)}</ErrorText>;
+    return <ErrorText>{t.assistant.loadTargetFailed(errMessage(page.error))}</ErrorText>;
   }
-  if (page.data === null) return null;
+  if (page.data === undefined) return <Loading label={t.assistant.loadingTarget} />;
 
   return (
     <Container
@@ -331,8 +324,8 @@ function allLines(text: string, kind: DiffLine['kind']): DiffLine[] {
 }
 
 /** Where a new page would land, as far as it is known. */
-function placement(t: Messages, spaceName: string | null, parent: PageDetail | null): string {
-  if (parent !== null) return t.assistant.underParent(parent.title);
+function placement(t: Messages, spaceName: string | null, parent: PageDetail | undefined): string {
+  if (parent !== undefined) return t.assistant.underParent(parent.title);
   if (spaceName !== null) return t.assistant.underSpace(spaceName);
   return '';
 }

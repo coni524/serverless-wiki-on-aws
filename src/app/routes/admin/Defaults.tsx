@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
@@ -9,8 +10,13 @@ import Select from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
-import { useAsync } from '@/hooks/use-async';
+import { errMessage } from '@/utils/errors';
 import type { Group } from '@/types/api';
+import {
+  defaultsQuery,
+  noteDefaultsChanged,
+  userGroupsQuery,
+} from '@/features/admin/api/admin-cache';
 import { ActionError, useAction } from '@/features/admin/components/parts';
 
 /**
@@ -28,21 +34,27 @@ import { ActionError, useAction } from '@/features/admin/components/parts';
  */
 export function AdminDefaults() {
   const t = useT();
-  const { data, error, loading, reload } = useAsync(async () => {
-    const [defaults, userGroups] = await Promise.all([api.getDefaults(), api.listUserGroups()]);
-    return { defaults, userGroups };
-  }, []);
+  // The record and the picker's options are two questions, so they are two
+  // entries: the group listing is the one the user-group screen reads, and this
+  // screen draws it without asking again.
+  const defaults = useQuery(defaultsQuery());
+  const userGroups = useQuery(userGroupsQuery());
 
-  if (loading) return <Loading label={t.admin.defaults.loading} />;
-  if (error !== null) return <ErrorText>{error}</ErrorText>;
-  if (data === null) return null;
+  const error = defaults.error ?? userGroups.error;
+  if (error !== null) return <ErrorText>{errMessage(error)}</ErrorText>;
+  if (defaults.data === undefined || userGroups.data === undefined) {
+    return <Loading label={t.admin.defaults.loading} />;
+  }
 
   return (
     <DefaultsForm
-      key={`${data.defaults.defaultUserGroupId ?? ''}:${data.defaults.version}`}
-      current={data.defaults}
-      userGroups={data.userGroups}
-      onSaved={reload}
+      // Keyed on the record it was built from: a save answers with a new
+      // version, and the form has to start again from what the server now holds
+      // or the next save would send a version the server has moved past.
+      key={`${defaults.data.defaultUserGroupId ?? ''}:${defaults.data.version}`}
+      current={defaults.data}
+      userGroups={userGroups.data}
+      onSaved={noteDefaultsChanged}
     />
   );
 }

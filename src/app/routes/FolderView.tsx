@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import BreadcrumbGroup from '@cloudscape-design/components/breadcrumb-group';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
@@ -13,9 +14,8 @@ import { useDateTimeFormat, useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
 import { errMessage } from '@/utils/errors';
 import { sortSiblings } from '@/features/pages/utils/sort';
-import { useAsync } from '@/hooks/use-async';
-import type { FolderDetail, NodeKind, Page } from '@/types/api';
-import { noteFreshness } from '@/features/pages/api/page-cache';
+import type { NodeKind, Page } from '@/types/api';
+import { folderKey, loadMoreTreeLevel, treeLevelQuery } from '@/features/pages/api/page-cache';
 import { hrefHome, hrefNode, hrefSpace, navigate } from '@/lib/router';
 
 /**
@@ -51,18 +51,22 @@ export function FolderView({
   onBreadcrumb: (spaceId: string, ancestorIds: string[]) => void;
 }) {
   const t = useT();
-  const { data: folder, error, loading } = useAsync<FolderDetail>(
-    () => api.getFolder(folderId),
-    [folderId],
-  );
+  // Through the query cache rather than a fetch of its own, so that a rename
+  // made in the tree row relabels this heading in the same frame: the tree
+  // writes the new title into this entry (`noteRenamedNode`).
+  const {
+    data: folder,
+    error,
+    isPending,
+  } = useQuery({ queryKey: folderKey(folderId), queryFn: () => api.getFolder(folderId) });
 
   useEffect(() => {
     if (folder) onBreadcrumb(spaceId, folder.breadcrumb.map((step) => step.pageId));
   }, [folder, spaceId, onBreadcrumb]);
 
-  if (loading) return <Loading label={t.page.loadingFolder} />;
-  if (error !== null) return <FolderUnavailable spaceId={spaceId} error={error} />;
-  if (folder === null) return null;
+  if (error) return <FolderUnavailable spaceId={spaceId} error={errMessage(error)} />;
+  if (isPending) return <Loading label={t.page.loadingFolder} />;
+  if (folder === undefined) return null;
 
   const title = folder.title || t.page.untitled;
 
@@ -120,9 +124,11 @@ export function FolderView({
 /**
  * What the folder holds, in the order the tree shows it.
  *
- * The same call the tree makes, paged the same way: `listChildPages` answers for
- * both kinds at once because they share one partition and one sort order,
- * so the listing needs no merging.
+ * Not merely the same call the tree makes — the same query. One entry in the
+ * cache holds the level, whichever of the two fetched it, so a node deleted
+ * from the tree row leaves this table at the same moment and neither screen
+ * reloads to find out. `listChildPages` answers for both kinds at once because
+ * they share one partition and one sort order, so the listing needs no merging.
  *
  * The rows are then put in the screen's own order — folders first, then pages,
  * each by name — which is why the sort happens at render and not
@@ -132,65 +138,31 @@ export function FolderView({
 function FolderContents({ spaceId, folderId }: { spaceId: string; folderId: string }) {
   const t = useT();
   const dateTime = useDateTimeFormat();
-  const [items, setItems] = useState<Page[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data: level, error, isPending } = useQuery(treeLevelQuery(spaceId, folderId));
+  // The continuation runs outside the query, as it does in the tree, so its
+  // failure is reported on its own rather than replacing the rows already read.
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
 
-  // Written out rather than run through `useAsync`, because a second page is
-  // appended to the first rather than replacing it.
-  useEffect(() => {
-    let live = true;
-    setItems([]);
-    setCursor(null);
-    setError(null);
-    setLoading(true);
-    api
-      .listChildPages(spaceId, folderId)
-      .then((result) => {
-        if (!live) return;
-        // The rows carry revisions and update times, and recording them is what
-        // lets a page opened from here render its held body with no request
-        // — the same bargain the tree strikes.
-        noteFreshness(result.items);
-        setItems(result.items);
-        setCursor(result.nextCursor);
-        setLoading(false);
-      })
-      .catch((e) => {
-        if (!live) return;
-        setError(errMessage(e));
-        setLoading(false);
-      });
-    return () => {
-      live = false;
-    };
-  }, [spaceId, folderId]);
+  const items = level?.items ?? [];
+  const cursor = level?.cursor ?? null;
 
   const loadMore = (from: string) => {
-    setLoading(true);
-    api
-      .listChildPages(spaceId, folderId, from)
-      .then((result) => {
-        noteFreshness(result.items);
-        setItems((prev) => [...prev, ...result.items]);
-        setCursor(result.nextCursor);
-        setLoading(false);
-      })
-      .catch((e) => {
-        setError(errMessage(e));
-        setLoading(false);
-      });
+    setLoadingMore(true);
+    setMoreError(null);
+    loadMoreTreeLevel(spaceId, folderId, from)
+      .catch((e: unknown) => setMoreError(errMessage(e)))
+      .finally(() => setLoadingMore(false));
   };
 
-  if (error !== null) return <ErrorText>{error}</ErrorText>;
+  if (error) return <ErrorText>{errMessage(error)}</ErrorText>;
 
   return (
     <SpaceBetween size="s">
       <Table
         variant="container"
         items={sortSiblings(items)}
-        loading={loading && items.length === 0}
+        loading={isPending || loadingMore}
         loadingText={t.common.loading}
         trackBy={(item) => item.pageId}
         columnDefinitions={[
@@ -211,6 +183,7 @@ function FolderContents({ spaceId, folderId }: { spaceId: string; folderId: stri
           </Box>
         }
       />
+      {moreError !== null && <ErrorText>{moreError}</ErrorText>}
       {cursor !== null && (
         <Link variant="primary" onFollow={() => loadMore(cursor)}>
           {t.page.loadMore}

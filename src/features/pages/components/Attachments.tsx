@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -13,9 +14,13 @@ import Table from '@cloudscape-design/components/table';
 import { useDateTimeFormat, useT } from '@/lib/i18n';
 import { errMessage } from '@/utils/errors';
 import { formatBytes } from '@/utils/format';
-import { useAsync } from '@/hooks/use-async';
 import type { Attachment } from '@/types/api';
 import { forgetAttachment } from '@/features/pages/api/attachment-cache';
+import {
+  attachmentsQuery,
+  noteDeletedAttachment,
+  noteUploadedAttachment,
+} from '@/features/pages/api/attachment-list';
 
 /**
  * A page's attachments. Uploads and downloads go browser-to-S3 over a
@@ -27,7 +32,7 @@ import { forgetAttachment } from '@/features/pages/api/attachment-cache';
 export function Attachments({ pageId, canEdit }: { pageId: string; canEdit: boolean }) {
   const t = useT();
   const dateTime = useDateTimeFormat();
-  const { data, error, loading, reload } = useAsync(() => api.listAttachments(pageId), [pageId]);
+  const { data, error, isPending } = useQuery(attachmentsQuery(pageId));
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<Attachment | null>(null);
@@ -48,7 +53,7 @@ export function Attachments({ pageId, canEdit }: { pageId: string; canEdit: bool
         body: file,
       });
       if (!put.ok) throw new Error(t.page.uploadFailed(put.status));
-      reload();
+      noteUploadedAttachment(pageId);
     } catch (e) {
       setActionError(errMessage(e));
     } finally {
@@ -75,7 +80,7 @@ export function Attachments({ pageId, canEdit }: { pageId: string; canEdit: bool
       // The id is only in hand here. Nothing else can find these bytes once the
       // attachment is gone, so this is the one chance to drop them.
       await forgetAttachment(attachment.attachmentId);
-      reload();
+      noteDeletedAttachment(pageId, attachment.attachmentId);
     } catch (e) {
       setActionError(errMessage(e));
     } finally {
@@ -112,11 +117,11 @@ export function Attachments({ pageId, canEdit }: { pageId: string; canEdit: bool
     >
       <SpaceBetween size="s">
         {actionError !== null && <Alert type="error">{actionError}</Alert>}
-        {error !== null && <Alert type="error">{error}</Alert>}
+        {error !== null && <Alert type="error">{errMessage(error)}</Alert>}
 
         <Table
           variant="embedded"
-          loading={loading}
+          loading={isPending}
           loadingText={t.common.loading}
           items={items}
           trackBy={(attachment) => attachment.attachmentId}

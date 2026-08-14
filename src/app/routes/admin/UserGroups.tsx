@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Header from '@cloudscape-design/components/header';
@@ -10,8 +11,18 @@ import Table from '@cloudscape-design/components/table';
 import TextFilter from '@cloudscape-design/components/text-filter';
 import { useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
-import { useAsync } from '@/hooks/use-async';
+import { errMessage } from '@/utils/errors';
 import type { Group } from '@/types/api';
+import {
+  attachedRoleGroupsQuery,
+  membersQuery,
+  noteAttachmentChanged,
+  noteGroupsChanged,
+  noteMembersChanged,
+  refreshAdmin,
+  roleGroupsQuery,
+  userGroupsQuery,
+} from '@/features/admin/api/admin-cache';
 import {
   followRoute,
   hrefAdmin,
@@ -39,7 +50,7 @@ import {
  */
 export function UserGroupList() {
   const t = useT();
-  const { data, error, loading, reload } = useAsync(() => api.listUserGroups(), []);
+  const { data, error, isPending, isFetching, refetch } = useQuery(userGroupsQuery());
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Group | null>(null);
   const action = useAction();
@@ -47,18 +58,23 @@ export function UserGroupList() {
   return (
     <SpaceBetween size="m">
       <ActionError action={action} />
-      {error !== null && <ErrorText>{error}</ErrorText>}
+      {error !== null && <ErrorText>{errMessage(error)}</ErrorText>}
 
       <Table
         variant="container"
         header={
           <Header
             variant="h2"
-            counter={data === null ? undefined : `(${data.length})`}
+            counter={data === undefined ? undefined : `(${data.length})`}
             description={t.admin.userGroups.listDescription}
             actions={
               <SpaceBetween size="xs" direction="horizontal">
-                <Button iconName="refresh" ariaLabel={t.admin.shared.reload} onClick={reload} />
+                <Button
+                  iconName="refresh"
+                  ariaLabel={t.admin.shared.reload}
+                  loading={isFetching}
+                  onClick={() => void refetch()}
+                />
                 <Button variant="primary" onClick={() => setCreating(true)}>
                   {t.common.create}
                 </Button>
@@ -70,7 +86,7 @@ export function UserGroupList() {
         }
         items={data ?? []}
         trackBy={(group) => group.id}
-        loading={loading}
+        loading={isPending}
         loadingText={t.admin.userGroups.loading}
         columnDefinitions={[
           {
@@ -119,6 +135,7 @@ export function UserGroupList() {
           nameLabel={t.admin.userGroups.nameLabel}
           onCreate={async (input) => {
             const { userGroupId } = await api.createUserGroup(input);
+            noteGroupsChanged();
             navigate(hrefAdminUserGroup(userGroupId));
           }}
           onDismiss={() => setCreating(false)}
@@ -132,7 +149,7 @@ export function UserGroupList() {
           onConfirm={() =>
             action.run(() => api.deleteUserGroup(deleting.id), () => {
               setDeleting(null);
-              reload();
+              noteGroupsChanged();
             })
           }
           onDismiss={() => setDeleting(null)}
@@ -147,38 +164,45 @@ export function UserGroupList() {
 /** One user group: its members, and the role groups attached to it. */
 export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
   const t = useT();
-  const { data, error, loading, reload } = useAsync(async () => {
-    const [groups, members, attached, roleGroups] = await Promise.all([
-      api.listUserGroups(),
-      api.listUserGroupMembers(userGroupId),
-      api.listUserGroupRoleGroups(userGroupId),
-      api.listRoleGroups(),
-    ]);
-    return {
-      group: groups.find((item) => item.id === userGroupId) ?? null,
-      members,
-      attached,
-      roleGroups,
-    };
-  }, [userGroupId]);
+  // Four entries rather than one fetch of four calls, because three of them are
+  // shared: the two group listings are what the list screens read, and the
+  // edges are what the role group's own screen shows from the other side. A
+  // membership removed here therefore refetches the members and nothing else.
+  const groups = useQuery(userGroupsQuery());
+  const members = useQuery(membersQuery(userGroupId));
+  const attached = useQuery(attachedRoleGroupsQuery(userGroupId));
+  const roleGroups = useQuery(roleGroupsQuery());
 
   const action = useAction();
   const [addingMember, setAddingMember] = useState(false);
   const [addingRoleGroup, setAddingRoleGroup] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  if (loading) return <Loading label={t.admin.userGroups.loading} />;
-  if (error !== null) return <ErrorText>{error}</ErrorText>;
-  if (data === null) return null;
-  if (data.group === null) return <ErrorText>{t.admin.userGroups.notFound}</ErrorText>;
+  const error = groups.error ?? members.error ?? attached.error ?? roleGroups.error;
+  if (error !== null) return <ErrorText>{errMessage(error)}</ErrorText>;
 
-  const group = data.group;
+  const groupList = groups.data;
+  const memberList = members.data;
+  const attachedList = attached.data;
+  const roleGroupList = roleGroups.data;
+  if (
+    groupList === undefined ||
+    memberList === undefined ||
+    attachedList === undefined ||
+    roleGroupList === undefined
+  ) {
+    return <Loading label={t.admin.userGroups.loading} />;
+  }
+
+  const group = groupList.find((item) => item.id === userGroupId) ?? null;
+  if (group === null) return <ErrorText>{t.admin.userGroups.notFound}</ErrorText>;
+
   // The role groups this group already reaches, resolved to their names. An id
   // with no match is an attachment whose role group was deleted; it is shown as
   // the bare id rather than hidden, because it is still an edge in the table.
-  const attachedRoleGroups = data.attached.map(({ roleGroupId }) => ({
+  const attachedRoleGroups = attachedList.map(({ roleGroupId }) => ({
     roleGroupId,
-    roleGroup: data.roleGroups.find((item) => item.id === roleGroupId) ?? null,
+    roleGroup: roleGroupList.find((item) => item.id === roleGroupId) ?? null,
   }));
 
   return (
@@ -188,7 +212,11 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
         description={group.description}
         actions={
           <SpaceBetween size="xs" direction="horizontal">
-            <Button iconName="refresh" ariaLabel={t.admin.shared.reload} onClick={reload} />
+            <Button
+              iconName="refresh"
+              ariaLabel={t.admin.shared.reload}
+              onClick={refreshAdmin}
+            />
             <Button disabled={group.system} onClick={() => setDeleting(true)}>
               {t.common.delete}
             </Button>
@@ -208,7 +236,7 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
         header={
           <Header
             variant="h2"
-            counter={`(${data.members.length})`}
+            counter={`(${memberList.length})`}
             description={t.admin.userGroups.membersDescription}
             actions={
               <Button variant="primary" onClick={() => setAddingMember(true)}>
@@ -219,7 +247,7 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
             {t.admin.userGroups.membersHeader}
           </Header>
         }
-        items={data.members}
+        items={memberList}
         trackBy={(member) => member.userId}
         columnDefinitions={[
           { id: 'email', header: t.admin.shared.email, cell: (m) => m.email, isRowHeader: true },
@@ -231,9 +259,8 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
               <Button
                 variant="inline-link"
                 onClick={() =>
-                  action.run(
-                    () => api.removeUserFromUserGroup(userGroupId, member.userId),
-                    reload,
+                  action.run(() => api.removeUserFromUserGroup(userGroupId, member.userId), () =>
+                    noteMembersChanged(userGroupId),
                   )
                 }
               >
@@ -291,7 +318,7 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
                 onClick={() =>
                   action.run(
                     () => api.detachRoleGroupFromUserGroup(userGroupId, row.roleGroupId),
-                    reload,
+                    () => noteAttachmentChanged(userGroupId, row.roleGroupId),
                   )
                 }
               >
@@ -310,8 +337,7 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
       {addingMember && (
         <AddMember
           userGroupId={userGroupId}
-          memberIds={new Set(data.members.map((member) => member.userId))}
-          onDone={reload}
+          memberIds={new Set(memberList.map((member) => member.userId))}
           onDismiss={() => setAddingMember(false)}
         />
       )}
@@ -319,10 +345,9 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
       {addingRoleGroup && (
         <AttachRoleGroup
           userGroupId={userGroupId}
-          candidates={data.roleGroups.filter(
-            (roleGroup) => !data.attached.some((item) => item.roleGroupId === roleGroup.id),
+          candidates={roleGroupList.filter(
+            (roleGroup) => !attachedList.some((item) => item.roleGroupId === roleGroup.id),
           )}
-          onDone={reload}
           onDismiss={() => setAddingRoleGroup(false)}
         />
       )}
@@ -332,13 +357,14 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
           header={t.admin.shared.deleteHeader(group.name)}
           action={action}
           onConfirm={() =>
-            action.run(() => api.deleteUserGroup(userGroupId), () =>
-              navigate(hrefAdmin('user-groups')),
-            )
+            action.run(() => api.deleteUserGroup(userGroupId), () => {
+              noteGroupsChanged();
+              navigate(hrefAdmin('user-groups'));
+            })
           }
           onDismiss={() => setDeleting(false)}
         >
-          <Box>{t.admin.userGroups.deleteDetailBody(data.members.length)}</Box>
+          <Box>{t.admin.userGroups.deleteDetailBody(memberList.length)}</Box>
         </ConfirmModal>
       )}
     </SpaceBetween>
@@ -355,12 +381,10 @@ export function UserGroupDetail({ userGroupId }: { userGroupId: string }) {
 function AddMember({
   userGroupId,
   memberIds,
-  onDone,
   onDismiss,
 }: {
   userGroupId: string;
   memberIds: Set<string>;
-  onDone: () => void;
   onDismiss: () => void;
 }) {
   const t = useT();
@@ -407,7 +431,7 @@ function AddMember({
                     disabled={action.busy}
                     onClick={() =>
                       action.run(() => api.addUserToUserGroup(userGroupId, user.userId), () => {
-                        onDone();
+                        noteMembersChanged(userGroupId);
                         onDismiss();
                       })
                     }
@@ -433,12 +457,10 @@ function AddMember({
 function AttachRoleGroup({
   userGroupId,
   candidates,
-  onDone,
   onDismiss,
 }: {
   userGroupId: string;
   candidates: Group[];
-  onDone: () => void;
   onDismiss: () => void;
 }) {
   const t = useT();
@@ -481,7 +503,7 @@ function AttachRoleGroup({
                     action.run(
                       () => api.attachRoleGroupToUserGroup(userGroupId, roleGroup.id),
                       () => {
-                        onDone();
+                        noteAttachmentChanged(userGroupId, roleGroup.id);
                         onDismiss();
                       },
                     )

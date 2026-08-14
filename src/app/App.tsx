@@ -12,10 +12,10 @@ import TopNavigation, {
 import Link from '@cloudscape-design/components/link';
 import { ErrorText, Loading } from '@/components/ui';
 import { errMessage } from '@/utils/errors';
-import { useAsync, type Async } from '@/hooks/use-async';
 import type { Me, NodeKind } from '@/types/api';
+import { useMe } from '@/features/auth/api/identity';
 import { clearAttachmentCache } from '@/features/pages/api/attachment-cache';
-import { dropServerState, resetServerState, resetTreeLevels } from '@/features/pages/api/page-cache';
+import { dropServerState, resetServerState } from '@/features/pages/api/page-cache';
 import { LOCALES, LOCALE_NAMES, useLocale, useT, type Locale } from '@/lib/i18n';
 import { hrefAdmin, hrefHome, hrefNode, navigate, useRoute } from '@/lib/router';
 import { AdminNavigation } from '@/features/admin/components/AdminNavigation';
@@ -45,10 +45,9 @@ import { AdminView } from '@/app/routes/admin/AdminView';
  *
  * The tree lives beside the content rather than inside it, so the state the two
  * share is held here: `expandPath` (the current page's ancestors, reported by
- * the page view) keeps the selected page unfolded, and staleness travels
- * through the query cache (`resetTreeLevels` / `resetServerState`) rather than
- * through props. Only the space is on the tree's `key`, because only the space
- * makes it a different tree.
+ * the page view) keeps the selected page unfolded, and what a write changed
+ * travels through the query cache rather than through props. Only the space is
+ * on the tree's `key`, because only the space makes it a different tree.
  */
 export function App() {
   const t = useT();
@@ -77,7 +76,6 @@ export function App() {
   const [navigationWidth, setNavigationWidth] = useState(readStoredNavigationWidth);
   const [activeDrawerId, setActiveDrawerId] = useState<string | null>(null);
 
-  const bumpTree = useCallback(() => resetTreeLevels(), []);
   // Stable on purpose: the page view reports from an effect that lists this
   // callback among its dependencies, so a new function each render would report,
   // re-render, and report again without end.
@@ -85,30 +83,6 @@ export function App() {
     (spaceId: string, ancestorIds: string[]) => setBreadcrumb({ spaceId, ancestorIds }),
     [],
   );
-
-  // Remounts the routed view. Only the screens still fetching through
-  // `useAsync` need it — their requests are not in the query cache, so a reset
-  // cannot reach them. Falls away when the last of them moves to `useQuery`.
-  const [contentVersion, setContentVersion] = useState(0);
-
-  /**
-   * Refetch both the tree and the open page.
-   *
-   * Each is fetched once and then left alone, which is right for an edit made
-   * in the view that shows it — that view says when it changed something. Two
-   * kinds of write have no such view. The assistant's lands on the server and
-   * only the chunk stream knows; a rename or a delete in the tree changes a
-   * title the open page is also showing. Resetting every query and remounting
-   * the content is blunt but correct, and it is what stops such a change from
-   * staying invisible until the browser is reloaded.
-   */
-  const refetchAll = useCallback(() => {
-    // The reset first: it drops the held bodies and the stamps synchronously,
-    // so the views rebuilt by the remount cannot be handed the body a write
-    // just replaced.
-    resetServerState();
-    setContentVersion((v) => v + 1);
-  }, []);
 
   // Who the caches below hold data for. `undefined` until the first answer
   // lands, so settling the initial frame is not mistaken for a change of user.
@@ -222,7 +196,13 @@ export function App() {
   // read here too, so this is also where the assistant learns which page the
   // user is looking at — the one thing it cannot work out for itself.
   const assistant = useAssistant({
-    onWriteApplied: refetchAll,
+    // The one caller of the blunt instrument. The assistant's writes land on
+    // the server with only the chunk stream to say what they touched, so
+    // nothing here knows which page the model created, renamed, or deleted —
+    // and nothing here can apply the change the way the tree does for its own
+    // edits (`noteDeletedNode` and the rest). Every node is read again; the
+    // shell around them is left alone.
+    onWriteApplied: resetServerState,
     // Only a page is reported. The assistant's screen claim resolves to a page
     // it can read and quote; a folder has no body to be looking at.
     viewing: { spaceId, pageId: node?.kind === 'page' ? node.id : null },
@@ -238,9 +218,7 @@ export function App() {
   // it too. The auth block's `username` is not a display value: with sign-in by
   // email address the pool generates it, so on the real pool it is the Cognito
   // `sub`. The address the user typed comes from `me()`.
-  const identity = useAsync<Me | null>(() => (signedIn ? api.me() : Promise.resolve(null)), [
-    signedIn,
-  ]);
+  const identity = useMe(signedIn);
 
   const signOut = useCallback(async () => {
     // The sign-out itself is still the auth block's own state machine — only
@@ -310,11 +288,7 @@ export function App() {
               newNode={newNode}
               onNewNode={setNewNode}
               onNewNodeEnd={() => setNewNode(null)}
-              onCreated={(createdId, kind) => {
-                bumpTree();
-                navigate(hrefNode(spaceId, createdId, kind));
-              }}
-              onChanged={refetchAll}
+              onCreated={(createdId, kind) => navigate(hrefNode(spaceId, createdId, kind))}
             />
           ) : undefined
         }
@@ -361,8 +335,9 @@ export function App() {
               )}
               <div hidden={assistant.interrupts.length > 0}>
                 <SignedIn
-                  key={`content:${contentVersion}`}
-                  identity={identity}
+                  me={identity.data}
+                  error={identity.error === null ? null : errMessage(identity.error)}
+                  loading={identity.isPending}
                   route={route}
                   onCreate={startCreate}
                   onBreadcrumb={onBreadcrumb}
@@ -469,21 +444,24 @@ const TopBar = memo(function TopBar({
 
 /** Waits for the signed-in identity the shell is loading, then routes. */
 function SignedIn({
-  identity,
+  me,
+  error,
+  loading,
   route,
   onCreate,
   onBreadcrumb,
 }: {
-  identity: Async<Me | null>;
+  me: Me | undefined;
+  error: string | null;
+  loading: boolean;
   route: ReturnType<typeof useRoute>;
   onCreate: (parentPageId: string, kind: NodeKind) => void;
   onBreadcrumb: (spaceId: string, ancestorIds: string[]) => void;
 }) {
   const t = useT();
-  const { data: me, error, loading } = identity;
   if (loading) return <Loading label={t.app.loadingUser} />;
-  if (error) return <ErrorText>{t.app.identityFailed(error)}</ErrorText>;
-  if (!me) return null;
+  if (error !== null) return <ErrorText>{t.app.identityFailed(error)}</ErrorText>;
+  if (me === undefined) return null;
 
   switch (route.name) {
     case 'home':

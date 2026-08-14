@@ -1,4 +1,4 @@
-import { api } from 'aws-blocks';
+import { useQuery } from '@tanstack/react-query';
 import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import BreadcrumbGroup from '@cloudscape-design/components/breadcrumb-group';
@@ -7,8 +7,9 @@ import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
 import { useT } from '@/lib/i18n';
 import { ErrorText, Loading } from '@/components/ui';
+import { errMessage } from '@/utils/errors';
 import { canWrite } from '@/features/spaces/utils/permissions';
-import { useAsync } from '@/hooks/use-async';
+import { spaceQuery } from '@/features/spaces/api/space-cache';
 import type { NodeKind } from '@/types/api';
 import { hrefHome, hrefSpace, navigate } from '@/lib/router';
 import { FolderView } from '@/app/routes/FolderView';
@@ -33,11 +34,11 @@ export function SpaceView({
   onBreadcrumb: (spaceId: string, ancestorIds: string[]) => void;
 }) {
   const t = useT();
-  const { data: space, error, loading } = useAsync(() => api.getSpace(spaceId), [spaceId]);
+  const { data: space, error, isPending } = useQuery(spaceQuery(spaceId));
 
-  if (loading) return <Loading label={t.space.loadingSpace} />;
-  if (error !== null) return <ErrorText>{error}</ErrorText>;
-  if (space === null) return null;
+  if (isPending) return <Loading label={t.space.loadingSpace} />;
+  if (error !== null) return <ErrorText>{errMessage(error)}</ErrorText>;
+  if (space === undefined) return null;
 
   const editable = canWrite(space.permission);
 
