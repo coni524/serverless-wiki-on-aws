@@ -8,8 +8,10 @@
 
 [English](README.md) | **日本語**
 
-AWS（Amazon Web Services）のサーバーレスのサービスで動く Markdown の Wiki です。
-スペースごとに権限を持ち、Amazon Bedrock の AI アシスタントが利用者の書いたページから答え、Obsidian と MCP（Model Context Protocol、AI クライアントとツールを接続する標準プロトコル）のクライアントが同じ権限判定を通って同じ中身を読み書きします。
+運用者の AWS（Amazon Web Services）アカウントの中だけで動く Markdown の Wiki です。
+AI エージェントが権限モデルの外へ出ないまま使えることを狙って作っています。
+ブラウザーの画面、Amazon Bedrock の AI アシスタント、MCP（Model Context Protocol、AI クライアントとツールを接続する標準プロトコル）のクライアント、Obsidian（ローカルの Markdown ノートアプリ）の同期プラグインは、どれも同じページを読み書きし、API 層がリクエストごとに判定する同じスペース権限を通ります。
+利用者が読めないスペースは、その利用者に代わって AI アシスタントが読むこともできません。
 
 常時動かしておく EC2 インスタンス、コンテナ、データベースクラスタはありません。
 デプロイするのは Lambda、API Gateway、DynamoDB、S3、CloudFront、Cognito、SQS、Bedrock です。
@@ -22,10 +24,11 @@ AWS（Amazon Web Services）のサーバーレスのサービスで動く Markdo
 
 - Markdown のページを、スペースごとのフォルダーとページの木構造で整理します
 - スペース単位の権限を、API 層がリクエストごとに判定します。画面、AI アシスタント、MCP サーバー、同期用 API のすべてが同じ判定を通ります
+- サインインは Cognito のメールアドレスで、すべてのアカウントに TOTP（Time-based One-Time Password、認証アプリが出す時限式のワンタイムパスワード）の MFA（多要素認証）を必須にします。サインアップは塞いであり、運用者がアカウントを作ります。自分の権限を上げる API はありません
 - Amazon Bedrock の AI アシスタントが Wiki を検索し、見つけた内容から答え、利用者が承認したときだけページを書き換えます。既定で答えるモデルは Amazon Nova 2 Lite で、環境変数 `AI_MODEL_ID` が別の Bedrock のモデルに差し替えます
-- 意味検索を Bedrock Knowledge Bases、S3 Vectors（ベクトル検索用のストレージ）、Titan Text Embeddings V2 で行います
+- 検索窓は 1 つで、2 通りの検索を融合します。スペースごとの転置インデックス（語からその語を含む文書の一覧を引く索引）を BM25（語の珍しさと出現回数から重要度を出す式）で順位付けして完全一致の語や識別子を引き、Bedrock Knowledge Bases と S3 Vectors（ベクトル検索用のストレージ）と Titan Text Embeddings V2 が意味の近いページを引き、両方の順位を RRF（Reciprocal Rank Fusion、順位の逆数を足し合わせて 1 つに融合する手法）で並べ直します。結果にはヒット箇所の抜粋が付き、打鍵の途中ではサジェストが出ます
 - `POST /mcp` の MCP サーバーが、Cognito を認可サーバーとする OAuth 2.1 の認証で、Claude などの MCP クライアントに応えます
-- Obsidian（ローカルの Markdown ノートアプリ）の保管庫とスペースを双方向に同期するプラグインを同梱しています
+- Obsidian の保管庫とスペースを双方向に同期するプラグインを同梱しています
 - 添付ファイルは presigned URL（署名付き URL、短時間だけ有効なリンク）で配信します。バケットはパブリックアクセスを全面ブロックします
 - 画面はヘッダーで日本語と英語を切り替えられます
 - インフラは [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks)（Infrastructure-from-Code のフレームワーク）で定義します
@@ -129,6 +132,11 @@ aws cognito-idp admin-set-user-password \
   --profile <プロファイル名> --region <リージョン>
 ```
 
+ユーザープールは MFA を必須にしており、要素は TOTP だけです。
+そのため、運用者がブラウザーで最初にサインインすると、認証アプリの登録画面が出ます。
+運用者は表示された QR コードを認証アプリで読み取り、そのアプリが出す 6 桁のコードを入力します。
+2 回目以降のサインインは、コードの入力だけを求めます。
+
 ### 最初の管理者を作る
 
 運用者はブラウザで一度サインインします。
@@ -192,30 +200,32 @@ aws cloudformation describe-stacks --stack-name <スタック名> --profile <プ
 ```
 serverless-wiki-on-aws/
 ├── aws-blocks/           # バックエンド
-│   ├── index.cdk.ts      # スタックの定義（AWS Blocks + CDK）
+│   ├── index.cdk.ts      # CDK アプリ（Building Block の宣言は resources.ts）
 │   ├── index.ts          # フロントエンドが呼ぶ API
 │   ├── access.ts         # 権限判定
-│   ├── wiki-ops.ts       # ページ・ツリー・検索の操作
+│   ├── wiki-ops.ts       # ページ、ツリー、検索の操作
+│   ├── keyword-index.ts  # 転置インデックスの構築、検索、サジェスト
 │   ├── mcp.ts            # MCP サーバー（POST /mcp）
 │   ├── ext.ts            # 同期クライアント向け API（POST /ext/*）
 │   └── scripts/          # deploy、sandbox、seed-admin、destroy
 ├── src/                  # フロントエンド（React 19 + Vite + Cloudscape）
-│   ├── views/            # スペース・ページ・フォルダー・検索・管理の画面
-│   ├── components/       # ページツリー、編集欄、アシスタントの drawer、検索欄
-│   └── i18n/             # 日本語と英語の辞書
+│   ├── app/              # ルーティング、プロバイダー、画面の外枠
+│   ├── features/         # spaces、pages、search、assistant、auth、admin
+│   ├── components/       # feature をまたいで使う UI 部品
+│   └── lib/              # Markdown、差分、ルーター、TanStack Query、日英の辞書
 ├── clients/obsidian/     # Obsidian 同期プラグイン
-├── test/e2e.test.ts      # API 全体を通す E2E テスト
+├── test/                 # API 全体を通す E2E テストと、単体テスト
 ├── assets/               # この文書に載せる画面の画像と構成図
 └── README.md             # 英語版のこの文書
 ```
 
 ## 制約
 
-- **検索は意味検索だけです。** キーワード検索と全文検索は無く、完全一致の文字列や珍しい識別子では、それを含むページが出てこないことがあります。
-- **検索は保存に少し遅れます。** 再取り込みは 30 秒の待ち合わせを置いてからコーパス全体を読み直すため、書いたばかりのページはすぐには検索に出ません。
+- **検索は保存に少し遅れます。** 2 つの索引はどちらも 30 秒の待ち合わせを置いたジョブが作り直し、意味検索の側はそこからコーパス全体を読み直すため、書いたばかりのページはすぐには検索に出ません。
+- **日本語の索引は 2 文字ずつの bigram です。** 形態素解析器（辞書を持ち文を単語に分ける解析器）を Lambda に載せていないため、キーワード検索がまれに、同じ 2 文字の並びがたまたま揃っただけのページを拾います。
 - **Markdown は意図して絞った範囲だけを描画します。** 見出し、箇条書き、引用、コード、リンク、画像、強調は描画しますが、GFM（GitHub Flavored Markdown）の表は描画しません。AI アシスタントの返答と検索結果の抜粋は平文で表示するため、そこに含まれる Markdown の記法は記号のまま見えます。
-- **サインアップは塞いであります。** アカウントは運用者が Cognito のユーザープールに作ります。自分の権限を上げる API はありません。
-- **監査ログ、呼び出し頻度の制限、MFA（多要素認証）の必須化はありません。**
+- **最初の 1 人を入れるまでに CLI の操作が要ります。** デプロイ直後の運用者は、`pnpm run deploy` を 2 回実行し、AWS CLI で Cognito にアカウントを作り、一度サインインしてから `pnpm run seed-admin` を実行します。自分の権限を上げる API を Wiki が持たないため、最後の手順はスクリプトです。
+- **監査ログと呼び出し頻度の制限はありません。**
 
 ## 参考
 

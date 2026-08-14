@@ -8,9 +8,9 @@
 
 **English** | [日本語](README.ja.md)
 
-A Markdown wiki that runs on AWS serverless services. Spaces carry their own permissions, an Amazon Bedrock assistant answers from the pages you wrote, and Obsidian and MCP clients read and write the same content through the same permission checks.
+A Markdown wiki that runs entirely in your own AWS account, built so that AI agents can use it without stepping outside its permission model. The browser UI, the Amazon Bedrock assistant, MCP clients, and the Obsidian sync plugin read and write the same pages through the same space permission check, resolved in the API layer on every request. A space you cannot read is a space the assistant cannot read on your behalf.
 
-There are no EC2 instances, containers, or database clusters to keep running: the deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQS, and Bedrock.
+Nothing stays running: there are no EC2 instances, containers, or database clusters. The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQS, and Bedrock.
 
 ![A page in the wiki: the folder-and-page tree of the space on the left, the rendered Markdown on the right](assets/screenshot-page.png)
 
@@ -20,8 +20,9 @@ There are no EC2 instances, containers, or database clusters to keep running: th
 
 - Markdown pages arranged in a folder-and-page tree, one tree per space
 - Space-level permissions resolved on every request in the API layer — the UI, the AI assistant, the MCP server, and the sync API all pass the same check
+- Sign-in is a Cognito email address, and TOTP multi-factor authentication is required of every account. Sign-up is closed: an operator creates accounts, and no API raises anyone's own permissions
 - AI assistant on Amazon Bedrock: it searches the wiki, answers from what it finds, and edits pages only after you approve the change. Amazon Nova 2 Lite answers by default; `AI_MODEL_ID` swaps in another Bedrock model
-- Semantic search with Bedrock Knowledge Bases, S3 Vectors, and Titan Text Embeddings V2
+- Hybrid search in one box: an inverted index per space, ranked with BM25, finds exact keywords and identifiers; Bedrock Knowledge Bases with S3 Vectors and Titan Text Embeddings V2 finds meaning; the two rankings are fused with Reciprocal Rank Fusion. Results carry a highlighted excerpt, and suggestions appear as you type
 - MCP (Model Context Protocol) server at `POST /mcp`, authenticated with OAuth 2.1 through Cognito, for Claude and other MCP clients
 - Obsidian plugin that syncs a vault and a space in both directions
 - Attachments delivered through presigned URLs; the bucket blocks all public access
@@ -116,6 +117,8 @@ aws cognito-idp admin-set-user-password \
   --profile <profile> --region <region>
 ```
 
+The pool requires MFA and offers TOTP as the only factor, so the first sign-in in the browser presents an enrolment challenge: scan the QR code with an authenticator app and enter the six-digit code it shows. Every later sign-in asks for a code.
+
 ### The first administrator
 
 Sign in once in the browser. That sign-in writes your profile record and fixes the Cognito `sub` the next step points at, so it has to come first. Then find the permission table — its name starts with the stack id and ends in `-permissions` — and seed yourself.
@@ -170,30 +173,32 @@ The bundled plugin in `clients/obsidian/` syncs an Obsidian vault with the space
 ```
 serverless-wiki-on-aws/
 ├── aws-blocks/           # Backend
-│   ├── index.cdk.ts      # Stack definition (AWS Blocks + CDK)
+│   ├── index.cdk.ts      # CDK app; resources.ts declares the Building Blocks
 │   ├── index.ts          # API surface the frontend calls
 │   ├── access.ts         # Permission resolution
 │   ├── wiki-ops.ts       # Page, tree, and search operations
+│   ├── keyword-index.ts  # Inverted index: rebuild, search, suggest
 │   ├── mcp.ts            # MCP server (POST /mcp)
 │   ├── ext.ts            # Sync-client API (POST /ext/*)
 │   └── scripts/          # deploy, sandbox, seed-admin, destroy
 ├── src/                  # Frontend (React 19 + Vite + Cloudscape)
-│   ├── views/            # Space, page, folder, search, and admin screens
-│   ├── components/       # Page tree, editor, assistant drawer, search box
-│   └── i18n/             # Japanese and English dictionaries
+│   ├── app/              # Routes, providers, and the app shell
+│   ├── features/         # spaces, pages, search, assistant, auth, admin
+│   ├── components/       # UI shared across features
+│   └── lib/              # Markdown, diff, router, TanStack Query, i18n dictionaries
 ├── clients/obsidian/     # Obsidian sync plugin
-├── test/e2e.test.ts      # End-to-end test across the whole API
+├── test/                 # End-to-end test across the whole API, and unit tests
 ├── assets/               # Screenshots and the architecture diagram used by this README
 └── README.md             # This file
 ```
 
 ## Limitations
 
-- **Search is semantic only.** There is no keyword or full-text search, so an exact string or a rare identifier may not surface the page that contains it.
-- **Search lags a save.** Re-ingestion is debounced by 30 seconds and then re-reads the whole corpus, so a page you just wrote takes a moment to become findable.
+- **Search lags a save.** Both indexes are rebuilt by a job debounced by 30 seconds, and re-ingestion then re-reads the whole corpus, so a page you just wrote takes a moment to become findable.
+- **Japanese is indexed as bigrams.** No morphological analyzer ships in the Lambda, so a keyword query occasionally matches a page where the same character pairs merely happen to line up.
 - **Markdown is a deliberate subset.** Headings, lists, blockquotes, code, links, images, and inline marks render; GFM tables do not. Assistant replies and search excerpts are shown as plain text, so any Markdown in them appears as written.
-- **Sign-up is closed.** Accounts are created in the Cognito user pool by an operator, and no API raises anyone's own permissions.
-- **No audit log, request rate limiting, or enforced MFA.**
+- **Getting the first person in takes the CLI.** A fresh deployment needs `pnpm run deploy` twice, an account created in Cognito with the AWS CLI, one sign-in, and then `pnpm run seed-admin`. Nothing in the API raises anyone's own permissions, which is why the last step is a script.
+- **No audit log or request rate limiting.**
 
 ## Learn More
 
