@@ -294,13 +294,16 @@ const publicOrigin = process.env.MCP_PUBLIC_ORIGIN;
 if (publicOrigin !== undefined && publicOrigin !== '') {
   blocksStack.handler.addEnvironment('MCP_PUBLIC_ORIGIN', publicOrigin);
 } else if (!sandboxMode) {
-  // Not fatal: the rest of the Wiki works, and the operator may be deploying
-  // before they know the domain. Only MCP discovery is affected, and it fails
-  // in a way that is hard to read backwards, so it is called out here.
+  // Not fatal: the rest of the Wiki works, and on the first deploy this is
+  // expected — the distribution does not exist yet, and `scripts/deploy.ts`
+  // deploys a second time with the address as soon as it does. Only MCP
+  // discovery is affected, and it fails in a way that is hard to read
+  // backwards, so it is called out here.
   console.warn(
-    '[sl-wiki] MCP_PUBLIC_ORIGIN is not set. The MCP OAuth metadata will name the API Gateway ' +
-      'URL rather than the CloudFront/custom domain, and MCP clients will fail to connect. ' +
-      'Re-deploy with MCP_PUBLIC_ORIGIN=https://<your domain> once it is known.',
+    '[sl-wiki] MCP_PUBLIC_ORIGIN is not set. Until it is, the MCP OAuth metadata names the API ' +
+      'Gateway URL rather than the CloudFront/custom domain, and MCP clients fail to connect. ' +
+      'On the first deploy `pnpm run deploy` fills this in on its own second pass; for a custom ' +
+      'domain, re-deploy with MCP_PUBLIC_ORIGIN=https://<your domain>.',
   );
 }
 

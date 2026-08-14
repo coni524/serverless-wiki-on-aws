@@ -32,8 +32,8 @@ const HOSTING_URL_OUTPUT = 'HostingHostingUrl';
  * knows the answer, so this asks the stack.
  *
  * Returns `null` only when there is no stack yet. That is the first deploy, and
- * the address genuinely does not exist until it finishes; the CDK app warns,
- * and the next deploy picks the address up.
+ * the address genuinely does not exist until it finishes; this script asks
+ * again once it has, and deploys a second time with the answer.
  */
 async function deployedHostingOrigin(): Promise<string | null> {
   const stackName = getStackName({ sandbox: false, projectRoot });
@@ -83,25 +83,59 @@ function isStackNotFound(error: unknown): boolean {
 // somewhere the stack has never heard of.
 const wantsMcpOrigin = (process.env.MCP_PUBLIC_ORIGIN ?? '') === '';
 const wantsCorsOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '') === '';
+const wantsResolvedOrigin = wantsMcpOrigin || wantsCorsOrigins;
 
-if (wantsMcpOrigin || wantsCorsOrigins) {
-  const origin = await deployedHostingOrigin();
-  if (origin !== null) {
-    if (wantsMcpOrigin) {
-      process.env.MCP_PUBLIC_ORIGIN = origin;
-      console.log(`🔗 MCP_PUBLIC_ORIGIN resolved from the running stack: ${origin}`);
-    }
-    if (wantsCorsOrigins) {
-      process.env.CORS_ALLOWED_ORIGINS = origin;
-      console.log(`🔗 CORS_ALLOWED_ORIGINS resolved from the running stack: ${origin}`);
-    }
+/** Puts a resolved address into whichever of the two settings asked for one. */
+function applyOrigin(origin: string): void {
+  if (wantsMcpOrigin) {
+    process.env.MCP_PUBLIC_ORIGIN = origin;
+    console.log(`🔗 MCP_PUBLIC_ORIGIN resolved from the running stack: ${origin}`);
+  }
+  if (wantsCorsOrigins) {
+    process.env.CORS_ALLOWED_ORIGINS = origin;
+    console.log(`🔗 CORS_ALLOWED_ORIGINS resolved from the running stack: ${origin}`);
   }
 }
 
-deploy({
-  cdkAppPath: join(__dirname, '..', 'index.cdk.ts'),
-  projectRoot,
-}).catch((error) => {
+function runDeploy(): Promise<unknown> {
+  return deploy({
+    cdkAppPath: join(__dirname, '..', 'index.cdk.ts'),
+    projectRoot,
+  });
+}
+
+try {
+  // A stack that is already running knows its address, so a normal deploy needs
+  // one pass. `null` here means there is no stack: this is the first deploy.
+  const originBefore = wantsResolvedOrigin ? await deployedHostingOrigin() : null;
+  if (originBefore !== null) applyOrigin(originBefore);
+
+  await runDeploy();
+
+  // The first deploy created the distribution the settings above needed, so
+  // that pass configured the Lambda without them. Rather than leave the second
+  // pass to whoever typed the command — a step that is remembered until it
+  // isn't — this asks the stack that now exists and deploys again. Only the
+  // Lambda's environment changes, so the pass is short. The condition can only
+  // hold once: from here on the stack answers on the first ask.
+  if (wantsResolvedOrigin && originBefore === null) {
+    const origin = await deployedHostingOrigin();
+    if (origin === null) {
+      throw new Error(
+        'The deploy reported success but the stack cannot be found, so the Wiki address ' +
+          'cannot be read back and the settings that needed it are still unset. MCP clients ' +
+          'would fail to connect, and attachments would be refused in the browser. Run ' +
+          'pnpm run deploy again, or pass MCP_PUBLIC_ORIGIN and CORS_ALLOWED_ORIGINS explicitly.',
+      );
+    }
+    console.log(
+      '\n🔁 First deploy: the Wiki address existed only once the run above finished. ' +
+        'Deploying once more to hand it to the Lambda. Later deploys take a single pass.',
+    );
+    applyOrigin(origin);
+    await runDeploy();
+  }
+} catch (error) {
   console.error(error);
   process.exit(1);
-});
+}
