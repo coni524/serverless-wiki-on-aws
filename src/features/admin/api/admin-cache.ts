@@ -2,12 +2,12 @@
  * What the four management screens read, and what their writes do to it.
  *
  * The permission model is a graph — account → user group → role group → space
- * (ADR-0010) — and every screen draws one or two of its edges while naming the
- * nodes at both ends. So the same three listings (`listUserGroups`,
+ * — and every screen draws one or two of its edges while naming the nodes at
+ * both ends. So the same three listings (`listUserGroups`,
  * `listRoleGroups`, `listSpaces`) are read by several screens at once, and they
  * are given one entry each rather than one per screen.
  *
- * A write here is applied the way every other write is (ADR-0026): what the
+ * A write here is applied the way every other write in the app is: what the
  * caller already knows goes straight in, what only the server can settle is
  * invalidated. Almost everything on these screens is the second kind — the
  * server decides whether a removal is allowed at all (the last administrator, a

@@ -6,8 +6,8 @@
  *
  * A download URL is deliberately absent from both. Every download and every
  * image render asks the API to sign the id afresh, because signing is where
- * `read` is re-evaluated (ADR-0004's presigned-URL contract), and a signature
- * held in a cache would outlive the permission that produced it.
+ * `read` is re-evaluated, and a signature held in a cache would outlive the
+ * permission that produced it.
  */
 import { api } from 'aws-blocks';
 import { type QueryKey } from '@tanstack/react-query';
