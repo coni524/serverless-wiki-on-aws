@@ -799,6 +799,12 @@ export async function updatePage(
       ? page.bodyKey
       : await writeBody(spaceId, pageId, revision, cleanBody(patch.body));
 
+  // Held rather than written inline, because it is half of the stamp
+  // (`bodyStamp`) and the answer carries it: a client that has just saved knows
+  // the body it sent is the current one only if it is told the stamp that body
+  // was written under.
+  const updatedAt = now();
+
   await table.put({
     pk: page.pk,
     sk: page.sk,
@@ -811,7 +817,7 @@ export async function updatePage(
     bodyKey: key,
     revision,
     createdAt: page.createdAt,
-    updatedAt: now(),
+    updatedAt,
     createdBy: page.createdBy,
     updatedBy: access.user.userSub,
   });
@@ -823,7 +829,7 @@ export async function updatePage(
   const bodyText = patch.body === undefined ? await readBody(page.bodyKey) : patch.body;
   await indexPage(spaceId, pageId, normalizeForCorpus(title, bodyText));
 
-  return { pageId, revision };
+  return { pageId, title, revision, updatedAt };
 }
 
 /**

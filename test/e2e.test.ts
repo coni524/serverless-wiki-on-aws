@@ -780,10 +780,18 @@ test('pages: the client stamp is the one the server honours', async () => {
   assert.strictEqual(afterRename.unchanged, false, 'A rename must invalidate the stamp');
   assert.strictEqual(afterRename.body, 'first body');
 
-  await api.updatePage(created.pageId, { body: 'second body' });
+  const saved = await api.updatePage(created.pageId, { body: 'second body' });
   const afterWrite = await api.getPage(created.pageId, stamp);
   assert.strictEqual(afterWrite.unchanged, false);
   assert.strictEqual(afterWrite.body, 'second body', 'A stale stamp must yield the current body');
+
+  // The save answers with the stamp its own write landed under, and that is
+  // what lets the client keep the text it just sent instead of reading the page
+  // back (`noteSavedPage`). If the answer and the record ever disagree, the
+  // client holds a body it believes current under a stamp the server will
+  // refuse — so the answer is checked against the server, not against itself.
+  const savedStamp = await api.getPage(created.pageId, stampOf(saved));
+  assert.strictEqual(savedStamp.unchanged, true, "A save's own stamp must be honoured");
 
   await api.deletePage(created.pageId);
 });
