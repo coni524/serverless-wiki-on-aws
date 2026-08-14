@@ -16,6 +16,12 @@ Nothing stays running: there are no EC2 instances, containers, or database clust
 
 *Reading a page. The pages shown here are sample content.*
 
+## Why this exists
+
+- **Your pages stay in an account you own.** The wiki deploys into your AWS account. Nobody else holds a copy, no other tenant shares the table, and the DynamoDB table and the S3 buckets outlive `pnpm run destroy` on purpose, because they are yours to delete deliberately.
+- **People and AI agents pass the same permission check.** Connecting a wiki to a model usually means handing it everything and asking it nicely to behave. Here the browser UI, the Bedrock assistant, MCP clients, and the Obsidian sync plugin all resolve the signed-in account's space permissions in the API layer, on every request — the AI is a caller like any other, and the check does not know or care that it is one.
+- **An idle wiki costs next to nothing.** Lambda, on-demand DynamoDB, and S3 bill per request and per stored byte, so a wiki nobody is reading bills for storage and little else. A team of five does not pay for a server that runs all night.
+
 ## Features
 
 - Markdown pages arranged in a folder-and-page tree, one tree per space
