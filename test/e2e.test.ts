@@ -30,7 +30,6 @@ import { unescapeModelNewlines } from '../aws-blocks/model-text.js';
 import { withoutDiscardedReplies } from '../aws-blocks/transcript.js';
 import { devServerIsUp, seed, seedLocal } from '../aws-blocks/scripts/seed-admin.js';
 import { countChanges, diffLines, tooLargeToDiff } from '../src/lib/diff.js';
-import { MAX_IMAGE_REFS, collectAttachmentRefs, renderMarkdown } from '../src/lib/markdown.js';
 import { join } from 'node:path';
 import { installCookieJar } from '@aws-blocks/blocks/utils';
 import type { api as ApiType, authApi as AuthApiType } from 'aws-blocks';
@@ -2693,127 +2692,6 @@ test('tooLargeToDiff refuses a body the comparison cannot afford', () => {
   assert.strictEqual(tooLargeToDiff(short, short), false);
   assert.strictEqual(tooLargeToDiff(short, long), true);
   assert.throws(() => diffLines(short, long), /too large/);
-});
-
-// ─── Images in a page body ───────────────────────────────────────────────────
-// Pure logic again. What these pin down is the boundary the renderer draws: an
-// image is an attachment of this page or it is not an image at all, and a body
-// that outlives its picture still renders.
-
-test('an image renders only from a signed attachment of the page', () => {
-  const body = '![図](attachment:att1)';
-
-  assert.match(
-    renderMarkdown(body, { att1: 'https://s3.example/att1?sig=a&exp=1' }),
-    /<img src="https:\/\/s3\.example\/att1\?sig=a&amp;exp=1" alt="図">/,
-    'The signed URL is escaped into the attribute, ampersands and all',
-  );
-  assert.match(
-    renderMarkdown(body, {}),
-    /図/,
-    'A picture that is gone leaves its alt text, not a broken page',
-  );
-  assert.doesNotMatch(renderMarkdown(body, null), /図/, 'Nothing shows before the URLs arrive');
-});
-
-test('an emphasis rule cannot rewrite the URL of a link or an image', () => {
-  // Every presigned URL carries underscores in its signature, so `_x_` would
-  // otherwise splice an `<em>` into the middle of the `src` and kill the image.
-  const signed = 'https://s3.example/att1?token=a_b_c_d';
-
-  assert.match(
-    renderMarkdown('![図](attachment:att1)', { att1: signed }),
-    /<img src="https:\/\/s3\.example\/att1\?token=a_b_c_d" alt="図">/,
-  );
-  assert.match(
-    renderMarkdown('[資料](https://example.com/a_b_c_d)', {}),
-    /<a href="https:\/\/example\.com\/a_b_c_d"/,
-  );
-  assert.match(
-    renderMarkdown('`snake_case_name`', {}),
-    /<code>snake_case_name<\/code>/,
-    'A code span keeps its underscores too',
-  );
-  assert.match(renderMarkdown('[*強調*した見出し](https://example.com/)', {}), /<em>強調<\/em>/);
-});
-
-test('a body cannot forge the placeholder the inline rules use', () => {
-  // U+E000 and U+E001 fence a parked tag while the rules run. A body that types
-  // them must not be able to name a tag that was parked elsewhere in the line.
-  const html = renderMarkdown('\uE0000\uE001 と ![図](attachment:att1)', { att1: 'https://s3/x' });
-
-  assert.strictEqual(html.match(/<img/g)?.length, 1, 'Only the real image is emitted');
-});
-
-test('an id naming an inherited property renders as a missing image, not a crash', () => {
-  // `images` is a plain object from the API. Reading `images['toString']` off
-  // its prototype would hand a function to the escaper and throw, and one line
-  // in one body would blank the whole app for every reader of that page.
-  for (const id of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
-    const html = renderMarkdown(`![図](attachment:${id})`, { att1: 'https://s3/x' });
-
-    assert.doesNotMatch(html, /<img/, `attachment:${id} must not become an image`);
-    assert.match(html, /図/);
-  }
-});
-
-test('a remote image is left as a link rather than embedded', () => {
-  // Embedding it would have the reader's browser call that host on open, which
-  // tells the host who read the page and when.
-  const html = renderMarkdown('![tracker](https://evil.example/pixel.png)', {});
-
-  assert.doesNotMatch(html, /<img/);
-  assert.match(html, /<a href="https:\/\/evil\.example\/pixel\.png"[^>]*>tracker<\/a>/);
-});
-
-test('an image reference cannot smuggle markup through its alt text', () => {
-  const html = renderMarkdown('![" onerror="alert(1)](attachment:att1)', { att1: 'https://s3/x' });
-
-  assert.doesNotMatch(html, /onerror="alert/);
-  assert.match(html, /&quot; onerror=&quot;alert\(1\)/);
-});
-
-test('collectAttachmentRefs takes each id once and drops what cannot be one', () => {
-  const body = [
-    '![a](attachment:att1)',
-    '![b](attachment:att1)',
-    '![c](attachment:../../secret)',
-    '![d](https://example.com/x.png)',
-    '![e](attachment:att2)',
-  ].join('\n\n');
-
-  assert.deepStrictEqual(collectAttachmentRefs(body), ['att1', 'att2']);
-});
-
-test('a body of unclosed brackets renders without stalling the reader', () => {
-  // The label and alt classes used to run to the end of the line and backtrack a
-  // character at a time looking for a `]` that was never there — one full scan
-  // per `[` in the body. `renderMarkdown` runs inside React's render, so a body
-  // like this wedged the tab of everyone who opened the page, and the editor is
-  // behind that render, so nobody could delete the text either. A megabyte of
-  // body is well within what `MAX_BODY_BYTES` allows anyone with `write` to save.
-  const bodies = ['['.repeat(200_000), '!['.repeat(100_000), '![]('.repeat(50_000)];
-
-  for (const body of bodies) {
-    const started = Date.now();
-    renderMarkdown(body, {});
-    const took = Date.now() - started;
-    assert.ok(took < 2000, `${JSON.stringify(body.slice(0, 4))}… took ${took}ms`);
-  }
-
-  // `collectAttachmentRefs` reads the whole body rather than one line, so it is
-  // the same rule over more text.
-  const started = Date.now();
-  collectAttachmentRefs('!['.repeat(100_000));
-  assert.ok(Date.now() - started < 2000);
-});
-
-test('collectAttachmentRefs stops at the number the API will sign', () => {
-  const body = Array.from({ length: MAX_IMAGE_REFS + 5 }, (_, i) => `![](attachment:id${i})`).join(
-    '\n\n',
-  );
-
-  assert.strictEqual(collectAttachmentRefs(body).length, MAX_IMAGE_REFS);
 });
 
 // ─── Keyword search ──────────────────────────────────────────────────────────

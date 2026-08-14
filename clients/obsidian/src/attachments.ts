@@ -140,7 +140,7 @@ const ownAttachment = (target: string): boolean =>
  * A body from the Wiki with its picture links reduced to what the Wiki can mean.
  *
  * The Wiki shows a picture only for an attachment of the page it is on — every
- * other target renders as a link there, not an embed (`src/markdown.ts`). So a
+ * other target renders as a link there, not an embed (`src/lib/markdown.tsx`). So a
  * body arriving from the Wiki that embeds `![](secret.png)` or
  * `![](../../another-space/_attachments/x/scan.png)` is naming a file in *this
  * vault*, which is something nobody on the Wiki side could have meant. Left as

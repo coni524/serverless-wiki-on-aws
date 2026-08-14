@@ -75,6 +75,8 @@ export const ja = {
   emptyBodyInline: '（本文はまだありません）',
   /** Stands in for an image whose attachment is gone and that carries no alt. */
   imageUnavailable: '（画像を表示できません）',
+  /** Heads the footnotes of a body. Read aloud only — the stylesheet hides it. */
+  footnotesLabel: '脚注',
 };
 
 export type Page = typeof ja;
@@ -142,4 +144,5 @@ export const en: Page = {
 
   emptyBodyInline: '(no content yet)',
   imageUnavailable: '(image unavailable)',
+  footnotesLabel: 'Footnotes',
 };

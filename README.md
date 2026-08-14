@@ -196,7 +196,7 @@ serverless-wiki-on-aws/
 
 - **Search lags a save.** Both indexes are rebuilt by a job debounced by 30 seconds, and re-ingestion then re-reads the whole corpus, so a page you just wrote takes a moment to become findable.
 - **Japanese is indexed as bigrams.** No morphological analyzer ships in the Lambda, so a keyword query occasionally matches a page where the same character pairs merely happen to line up.
-- **Markdown is a deliberate subset.** Headings, lists, blockquotes, code, links, images, and inline marks render; GFM tables do not. Assistant replies and search excerpts are shown as plain text, so any Markdown in them appears as written.
+- **Raw HTML in a body is not rendered.** Markdown is CommonMark plus GFM — tables, task lists, strikethrough — and a single newline is a line break, but a body's own HTML tags are shown as text rather than parsed. A page embeds only its own attachments as images; every other image target renders as a link, so opening a page never calls out to another host. Search excerpts are still plain text, so any Markdown in them appears as written.
 - **Getting the first person in takes the CLI.** A fresh deployment needs `pnpm run deploy` twice, an account created in Cognito with the AWS CLI, one sign-in, and then `pnpm run seed-admin`. Nothing in the API raises anyone's own permissions, which is why the last step is a script.
 - **No audit log or request rate limiting.**
 

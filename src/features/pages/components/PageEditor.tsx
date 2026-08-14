@@ -28,7 +28,7 @@ const EMBEDDABLE_IMAGE = /^image\/(png|jpeg|gif|webp|avif)$/;
  * A file name as alt text.
  *
  * `]` in the name would close the label early: the reference would stop matching
- * the image rule in `src/markdown.ts` and render as bare text, with the upload
+ * the image rule in `src/lib/markdown.tsx` and render as bare text, with the upload
  * itself having succeeded and nothing on screen to explain it. The brackets and
  * any line break come out of the label; the stored file name, which the download
  * serves back, keeps them.

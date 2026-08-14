@@ -31,7 +31,7 @@
     "preview": "vite preview",
     "deploy": "tsx aws-blocks/scripts/deploy.ts",
     "destroy": "tsx aws-blocks/scripts/destroy.ts",
-    "test:unit": "tsx --test \"test/unit/*.test.ts\"",
+    "test:unit": "tsx --test \"test/unit/*.test.ts\" \"test/unit/*.test.tsx\"",
     "test:e2e": "tsx -C browser test/e2e.test.ts",
     "vendorize": "blocks-vendorize"
   },
@@ -51,6 +51,9 @@
     "qrcode-generator": "^2.0.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
     "zod": "^4.3.0"
   },
   "devDependencies": {

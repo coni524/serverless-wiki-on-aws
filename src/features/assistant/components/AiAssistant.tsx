@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { api } from 'aws-blocks';
 import { useChat, type ChatMessage } from '@aws-blocks/bb-agent/client';
 import Alert from '@cloudscape-design/components/alert';
@@ -10,6 +10,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { errMessage } from '@/utils/errors';
 import { useLocale, useT, type Messages } from '@/lib/i18n';
+import { Markdown } from '@/components/Markdown';
 // The one rule that decides what a discarded change leaves behind, reached from
 // the browser so the live panel and a reloaded one agree. See the module.
 import { withoutDiscardedReplies } from '../../../../aws-blocks/transcript';
@@ -399,7 +400,15 @@ function scrollParent(from: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
-function Message({ message }: { message: ChatMessage }) {
+/**
+ * One turn of the conversation.
+ *
+ * Memoized because a reply arrives a chunk at a time: every chunk replaces the
+ * whole list, and re-parsing the Markdown of every earlier message on each one
+ * costs more the longer the thread gets. With this, only the message whose text
+ * actually changed is parsed again.
+ */
+const Message = memo(function Message({ message }: { message: ChatMessage }) {
   const t = useT();
   if (message.role === 'approval') {
     const approved = message.content === 'Approved' || message.content === 'yes';
@@ -414,12 +423,29 @@ function Message({ message }: { message: ChatMessage }) {
       <Box fontSize="body-s" color="text-label">
         {message.role === 'user' ? t.assistant.you : t.assistant.assistant}
       </Box>
-      {/* Plain text, not Markdown: an answer is rendered as the model wrote it,
-          so nothing in a page body can smuggle markup into this panel. */}
-      <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{message.content}</span>
+      {message.role === 'user' ? (
+        // What the user typed, as they typed it. A question that begins with a
+        // `-` is a question, not a list, and seeing it come back reshaped reads
+        // as the panel having altered it.
+        <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{message.content}</span>
+      ) : message.content.trim() === '' ? null : (
+        // The answer, through the renderer the page body uses. A model writes
+        // Markdown whether or not the panel reads it, so plain text showed its
+        // `**` and its tables as punctuation. Nothing a page body carries can
+        // become markup here: the renderer builds React elements, and a body's
+        // raw HTML stays inert. A link in an answer can still be one a page body
+        // talked the model into writing, so it opens in a new tab and carries no
+        // referrer, and it takes the reader's own click to follow.
+        //
+        // No `images`: an attachment id means nothing outside the page that owns
+        // it, so a reply that names one renders as nothing rather than as a
+        // picture from another page. The empty check is for the moment a reply
+        // exists but has not streamed a first character.
+        <Markdown source={message.content} />
+      )}
     </Box>
   );
-}
+});
 
 /**
  * The decision itself, pinned above the input while a write tool waits.

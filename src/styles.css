@@ -1,8 +1,8 @@
 /* The only styles this app still owns.
    Everything else — layout, forms, tables, the assistant drawer — comes from
-   Cloudscape. What is left is the rendered Markdown body, which is
-   raw HTML built by src/markdown.ts, the diff of a pending AI edit, which
-   Cloudscape has no component for, and the two behaviours the navigation panel
+   Cloudscape. What is left is the rendered Markdown body, whose elements
+   react-markdown emits bare (src/lib/markdown.tsx), the diff of a pending AI
+   edit, which Cloudscape has no component for, and the two behaviours the navigation panel
    needs but AppLayout does not provide: row controls that appear under the
    pointer, and an edge that can be dragged. */
 
@@ -140,11 +140,20 @@
   outline: none;
 }
 
+/* A rendered Markdown body (src/lib/markdown.tsx, through
+   src/components/Markdown.tsx).
+
+   The renderer emits plain HTML elements and leaves their look to this file.
+   The same rules dress the page body and the assistant's replies, which is why
+   the first and last child are stripped of their outer margin: in the panel a
+   reply is one message among several, and the spacing around it belongs to the
+   list, not to the paragraph. */
 .markdown {
   line-height: 1.7;
   word-break: break-word;
 }
 .markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
 .markdown h1,
 .markdown h2,
 .markdown h3 { margin-top: 1.4em; }
@@ -171,6 +180,59 @@
 }
 .markdown a { color: #006ce0; }
 .markdown img { max-width: 100%; }
+
+/* A GFM table.
+
+   `display: block` with `width: max-content` is what makes the table itself the
+   thing that scrolls. A table is as wide as its widest row demands, and the
+   assistant's panel is 420px, so a table with four columns would otherwise push
+   the whole panel sideways. Held to `max-width: 100%`, it keeps its own
+   horizontal scrollbar and the text around it stays put. */
+.markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid #d5dbdb;
+  padding: 6px 12px;
+  text-align: start;
+}
+.markdown th { background: #f3f3f3; font-weight: 700; }
+
+/* A GFM task list. The checkbox is the marker, so the list's own bullet would
+   be a second one; `remark-gfm` labels these lists for exactly this. */
+.markdown ul.contains-task-list { list-style: none; padding-inline-start: 1.2em; }
+.markdown li.task-list-item > input { margin-inline: -1.2em 0.4em; }
+
+/* GFM footnotes: the notes themselves, collected at the end of the body, and
+   the heading above them.
+
+   That heading exists for a reader who cannot see the layout — it is what tells
+   a screen reader where the notes begin — so it is taken off the screen rather
+   than removed. `clip-path` leaves it in the accessibility tree; `display: none`
+   would not. */
+.markdown .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.markdown .footnotes {
+  border-top: 1px solid #d5dbdb;
+  margin-top: 2em;
+  padding-top: 0.5em;
+  font-size: 0.9em;
+  color: #5f6b7a;
+}
 
 /* The diff of a pending AI edit (src/components/PendingChange.tsx).
 

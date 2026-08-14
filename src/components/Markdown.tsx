@@ -1,19 +1,18 @@
 import Box from '@cloudscape-design/components/box';
 import { useT } from '@/lib/i18n';
-import { renderMarkdown, type ImageUrls } from '@/lib/markdown';
+import { MarkdownBody, type ImageUrls } from '@/lib/markdown';
 
 /**
- * Render Markdown as sanitized HTML. The only Markdown surface in the app.
+ * Render Markdown. The only Markdown surface in the app.
  *
- * The rendering itself lives in `src/markdown.ts`; this is the React shell
- * around it. `images` carries the signed URL for each attachment the body
- * embeds. Left out, the body still renders in full and its images stay blank —
- * which is what a caller with no page to sign against (a preview, a snippet)
- * should show.
+ * The rendering itself lives in `src/lib/markdown.tsx`; this is the shell around
+ * it, and it exists to keep Cloudscape and the dictionary out of that module —
+ * which is what makes the renderer testable outside a browser.
  *
- * The renderer puts one string of its own on screen — what stands in for an
- * image it cannot resolve — and takes it from here, because this is the side of
- * the boundary that can read the dictionary.
+ * `images` carries the signed URL for each attachment the body embeds. Left out,
+ * the body still renders in full and its images stay blank, which is what a
+ * caller with no page to sign against (an assistant's reply, a preview) should
+ * show.
  */
 export function Markdown({ source, images = null }: { source: string; images?: ImageUrls }) {
   const t = useT();
@@ -21,11 +20,13 @@ export function Markdown({ source, images = null }: { source: string; images?: I
     return <Box color="text-status-inactive">{t.page.emptyBodyInline}</Box>;
   }
   return (
-    <div
-      className="markdown"
-      dangerouslySetInnerHTML={{
-        __html: renderMarkdown(source, images, t.page.imageUnavailable),
-      }}
-    />
+    <div className="markdown">
+      <MarkdownBody
+        source={source}
+        images={images}
+        unavailable={t.page.imageUnavailable}
+        footnoteLabel={t.page.footnotesLabel}
+      />
+    </div>
   );
 }
