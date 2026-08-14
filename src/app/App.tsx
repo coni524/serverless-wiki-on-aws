@@ -19,6 +19,7 @@ import { dropServerState, resetServerState, resetTreeLevels } from '@/features/p
 import { LOCALES, LOCALE_NAMES, useLocale, useT, type Locale } from '@/lib/i18n';
 import { hrefAdmin, hrefHome, hrefNode, navigate, useRoute } from '@/lib/router';
 import { AdminNavigation } from '@/features/admin/components/AdminNavigation';
+import { authenticatorOptions, watchTypedUsername } from '@/features/auth/components/totp-setup';
 import { ASSISTANT_DRAWER_ID, AiAssistant, useAssistant } from '@/features/assistant/components/AiAssistant';
 import {
   NavigationResizer,
@@ -531,9 +532,15 @@ function SignIn() {
   const formRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (formRef.current && !formRef.current.hasChildNodes()) {
-      formRef.current.appendChild(Authenticator(authApi));
-    }
+    const container = formRef.current;
+    if (container === null || container.hasChildNodes()) return;
+    // The pool requires an authenticator, and the block's own form cannot draw
+    // the enrolment step — see `totp-setup.ts`. The options put the QR code and
+    // the key into it; the watcher reads the address on its way past, so the
+    // authenticator app can label the account with it.
+    const unwatch = watchTypedUsername(container);
+    container.appendChild(Authenticator(authApi, authenticatorOptions()));
+    return unwatch;
   }, []);
 
   return (

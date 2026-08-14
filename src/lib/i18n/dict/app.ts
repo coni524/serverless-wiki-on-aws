@@ -18,6 +18,15 @@ export const ja = {
   signInHeading: 'サインイン',
   signInPrompt: '続けるにはサインインしてください。',
 
+  /** The first sign-in, where the pool asks the reader to enrol an authenticator. */
+  totpScanIntro: '認証アプリで次の QR コードを読み取り、表示された 6 桁を下に入力してください。',
+  totpTypeIntro: 'QR コードを読み取れないときは、次のキーを認証アプリに手で登録してください。',
+  totpQrLabel: '認証アプリ登録用の QR コード',
+  totpCopyKey: 'キーをコピー',
+  totpCopied: 'コピーしました',
+  totpSecretMissing:
+    '登録用のキーを受け取れませんでした。ページを再読み込みしてサインインからやり直してください。',
+
   openingPage: 'ページを開いています…',
   openPageFailed: (reason: string) => `ページを開けませんでした：${reason}`,
 
@@ -43,6 +52,14 @@ export const en: App = {
 
   signInHeading: 'Sign in',
   signInPrompt: 'Sign in to continue.',
+
+  totpScanIntro: 'Scan this QR code with your authenticator app, then enter the six digits it shows.',
+  totpTypeIntro: 'If you cannot scan it, add this key to your authenticator app by hand.',
+  totpQrLabel: 'QR code for enrolling an authenticator app',
+  totpCopyKey: 'Copy key',
+  totpCopied: 'Copied',
+  totpSecretMissing:
+    'No enrolment key arrived. Reload the page and sign in again.',
 
   openingPage: 'Opening the page…',
   openPageFailed: (reason: string) => `Could not open the page: ${reason}`,

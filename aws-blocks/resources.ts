@@ -38,10 +38,26 @@ export const scope = new Scope('sl-wiki');
 //
 // `signInWith: 'email'` makes the email address the Cognito username. Changing
 // this on a deployed pool is destructive, so it is fixed before the first deploy.
+//
+// `mfa: 'required'` with TOTP as the only factor. A global administrator can
+// read and write every space, so a single stolen password must not be enough;
+// requiring the second factor for everyone is what makes that true, since the
+// pool has no way to require it of one account and not another.
+//
+// TOTP alone, not email codes: the sign-in name *is* the email address here, so
+// an email factor would put both factors in the same mailbox. It also needs an
+// SES sender the pool does not have. SMS is absent for the same reason plus the
+// per-message cost. A user enrols on their first sign-in — the pool issues the
+// setup challenge itself, which the auth block's `<Authenticator>` renders.
+//
+// Note this does not apply to sessions that already exist: they carry a refresh
+// token, and a refresh is not a sign-in. Turning this on means dropping the
+// records in the session table (`docs/runbooks/enable-mfa.md`).
 export const auth = new AuthCognito(scope, 'auth', {
   signInWith: 'email',
   selfSignUp: false,
-  mfa: 'off',
+  mfa: 'required',
+  mfaTypes: ['TOTP'],
   passwordPolicy: {
     minLength: 12,
     requireUppercase: true,

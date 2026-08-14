@@ -48,6 +48,19 @@ const USERNAME = `e2e-${Date.now().toString(36)}@example.com`;
 const PASSWORD = 'E2eTestPass123!';
 
 /**
+ * The answer to every TOTP challenge in this suite.
+ *
+ * Any six digits pass: the mock's `CONTINUE_SIGN_IN_WITH_TOTP_SETUP` and
+ * `CONFIRM_SIGN_IN_WITH_TOTP_CODE` branches check the shape and nothing else,
+ * because no RFC 6238 verifier is wired into it. A deployed pool computes the
+ * code from the shared secret and would refuse this.
+ */
+const TOTP_CODE = '000000';
+
+/** What `getAuthState` / `setAuthState` answer with, taken from the client. */
+type AuthState = Awaited<ReturnType<typeof AuthApiType.getAuthState>>;
+
+/**
  * Cursor that skips every reclamation record older than this run.
  *
  * `listPendingCleanups()` reports the whole table, so records an earlier run
@@ -209,12 +222,17 @@ test('auth: confirming the code completes sign-up', async () => {
   assert.strictEqual(state.state, 'signedOut');
 });
 
-test('auth: sign in with the confirmed user', async () => {
-  const state = await authApi.setAuthState({
+test('auth: a password alone does not sign the user in', async () => {
+  const challenged = await authApi.setAuthState({
     action: 'signIn',
     username: USERNAME,
     password: PASSWORD,
   });
+  // The pool is `mfa: 'required'`, so the password is only the first leg. This
+  // user has enrolled nothing yet, which makes the challenge the enrolment.
+  assert.strictEqual(challenged.state, 'confirmingSignIn');
+
+  const state = await passSecondFactor(challenged);
   assert.strictEqual(state.state, 'signedIn');
   assert.strictEqual(state.user?.username, USERNAME);
 });
@@ -229,7 +247,7 @@ test('auth: a wrong password is rejected', async () => {
   assert.ok(state.errorName, 'Expected a structured error name on the signed-out state');
 
   // Restore the session for the remaining tests.
-  await authApi.setAuthState({ action: 'signIn', username: USERNAME, password: PASSWORD });
+  await signInAs(USERNAME, PASSWORD);
 });
 
 // ─── Identity ────────────────────────────────────────────────────────────────
@@ -282,8 +300,47 @@ async function ensureUser(username: string, password: string): Promise<void> {
 }
 
 async function signInAs(username: string, password: string): Promise<void> {
-  const state = await authApi.setAuthState({ action: 'signIn', username, password });
-  assert.strictEqual(state.state, 'signedIn', `Could not sign in as ${username}`);
+  const state = await passSecondFactor(
+    await authApi.setAuthState({ action: 'signIn', username, password }),
+  );
+  assert.strictEqual(
+    state.state,
+    'signedIn',
+    `Could not sign in as ${username}: ${state.errorName ?? '(no error name)'} ${state.error ?? ''}`,
+  );
+}
+
+/**
+ * Answer the TOTP challenge the pool raises, so a sign-in reaches `signedIn`.
+ *
+ * The pool is `mfa: 'required'` (`aws-blocks/resources.ts`), so a password is
+ * never the whole sign-in: the first one enrols an authenticator and every one
+ * after it asks for a code. Both arrive as `confirmingSignIn`, and both are
+ * answered the same way — hence the loop, which walks however many steps the
+ * pool puts in the way rather than assuming two.
+ *
+ * The code is a constant because the mock accepts any six digits for TOTP; it
+ * wires no RFC 6238 verifier, and its own comment says so. A deployed pool does
+ * verify, which is one more reason this suite only runs against the mock.
+ *
+ * The payload is rebuilt from the fields the state itself carries. Every step
+ * hides a different set behind `defaultValue` — `session` throughout, the
+ * `challenge` discriminator, and `sharedSecret` on the enrolment step — and
+ * copying whatever is there keeps this from having to know which step it is on.
+ */
+async function passSecondFactor(state: AuthState): Promise<AuthState> {
+  let current = state;
+  for (let step = 0; current.state === 'confirmingSignIn' && step < 4; step += 1) {
+    const action = current.actions?.find((candidate) => candidate.name === 'confirmSignIn');
+    assert.ok(action, 'Expected a confirmSignIn action on a confirmingSignIn state');
+    const payload: Record<string, string> = {};
+    for (const field of action.fields ?? []) {
+      if (typeof field.defaultValue === 'string') payload[field.name] = field.defaultValue;
+    }
+    payload.code = TOTP_CODE;
+    current = await authApi.setAuthState({ action: 'confirmSignIn', ...payload } as never);
+  }
+  return current;
 }
 
 /** Assert the call is refused, and that the refusal is the expected one. */
