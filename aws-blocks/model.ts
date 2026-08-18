@@ -34,6 +34,7 @@ export const ITEM_TYPES = [
   'USER_GROUP',
   'ROLE_GROUP',
   'MEMBERSHIP',
+  'ROLE_MEMBERSHIP',
   'ATTACHMENT',
   'GRANT',
   'CONFIG',
@@ -67,6 +68,16 @@ export const itemSchema = z
     // USER
     email: z.string().optional(),
     displayName: z.string().optional(),
+    /**
+     * Which external IdP signed this account in, absent for a Cognito account.
+     *
+     * The Wiki reads it to decide who owns the account's role groups. A
+     * federated account's role groups are rewritten from the IdP's claims on
+     * every sign-in, so the management screens show them read-only; letting an
+     * administrator edit them would produce a change the next sign-in silently
+     * undoes.
+     */
+    identityProvider: z.string().optional(),
 
     // SPACE / USER_GROUP / ROLE_GROUP
     name: z.string().min(1).max(200).optional(),
@@ -75,6 +86,24 @@ export const itemSchema = z
     system: z.boolean().optional(),
     /** ROLE_GROUP only: admin over every space, plus the management API. */
     global: z.boolean().optional(),
+    /**
+     * ROLE_GROUP only: the IdP groups whose members reach this role group,
+     * each scoped to the provider whose claim is trusted for it.
+     *
+     * The whole mapping from IdP groups to role groups is these fields taken
+     * together — there is no separate mapping record. Keeping it here is what
+     * makes the mapping editable in the one screen that already edits the role
+     * group, and readable in the one query that already lists them all.
+     */
+    idpGroups: z
+      .array(
+        z.object({
+          provider: z.string().min(1).max(32),
+          group: z.string().min(1).max(200),
+        }),
+      )
+      .max(20)
+      .optional(),
 
     // GRANT
     permission: z.enum(PERMISSIONS).optional(),
@@ -163,6 +192,15 @@ export const itemSchema = z
 export type Item = z.infer<typeof itemSchema>;
 
 // ─── Keys ────────────────────────────────────────────────────────────────────
+/**
+ * A user's partition.
+ *
+ * `userSub` is the pool's `sub`, whichever door the account came through — a
+ * federated sign-in is folded to the same `sub` at the door
+ * (`canonicalUserId` in `federation.ts`; only the local stub IdP keeps its
+ * `${iss}:${sub}` shape). Opaque here: nothing in this module parses the
+ * value, so every edge pointing at a user has one shape.
+ */
 export const userPk = (userSub: string) => `USER#${userSub}`;
 export const spacePk = (spaceId: string) => `SPACE#${spaceId}`;
 export const userGroupPk = (userGroupId: string) => `UG#${userGroupId}`;
@@ -321,8 +359,12 @@ export function between(lower: string, upper: string): string | null {
 /** Strip the `KIND#` prefix off a key segment. */
 export const idOf = (key: string) => key.slice(key.indexOf('#') + 1);
 
-/** Sort keys are compared byte-wise, so listings fold case up front. */
-export const sortable = (value: string) => value.toLowerCase();
+/**
+ * Fold a value for comparison: sort keys are compared byte-wise, so listings
+ * fold case up front, and surrounding whitespace never distinguishes two names
+ * a person would read as the same one.
+ */
+export const sortable = (value: string) => value.trim().toLowerCase();
 
 // ─── Seeded administrator identifiers ────────────────────────────────────────
 // Fixed ids so seeding is idempotent: re-running it writes the same keys. Shared

@@ -18,6 +18,10 @@ export const ja = {
   signInHeading: 'サインイン',
   signInPrompt: '続けるにはサインインしてください。',
 
+  /** The federated way in, shown only when the deployment has an IdP configured. */
+  signInWithProvider: (provider: string) => `${provider} でサインイン`,
+  signInOrPassword: 'または、メールアドレスとパスワードでサインイン',
+
   /** The first sign-in, where the pool asks the reader to enrol an authenticator. */
   totpScanIntro: '認証アプリで次の QR コードを読み取り、表示された 6 桁を下に入力してください。',
   totpTypeIntro: 'QR コードを読み取れないときは、次のキーを認証アプリに手で登録してください。',
@@ -52,6 +56,9 @@ export const en: App = {
 
   signInHeading: 'Sign in',
   signInPrompt: 'Sign in to continue.',
+
+  signInWithProvider: (provider: string) => `Sign in with ${provider}`,
+  signInOrPassword: 'Or sign in with your email address and password',
 
   totpScanIntro: 'Scan this QR code with your authenticator app, then enter the six digits it shows.',
   totpTypeIntro: 'If you cannot scan it, add this key to your authenticator app by hand.',

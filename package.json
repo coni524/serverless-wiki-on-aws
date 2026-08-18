@@ -58,6 +58,8 @@
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1105.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1109.0",
+    "@aws-sdk/client-ssm": "^3.1109.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

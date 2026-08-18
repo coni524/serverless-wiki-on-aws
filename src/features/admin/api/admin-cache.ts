@@ -62,6 +62,20 @@ export const attachedUserGroupsKey = (roleGroupId: string): QueryKey => [
   'user-groups',
 ];
 
+/**
+ * The federated accounts a role group holds directly.
+ *
+ * No screen writes this edge: a sign-in does, from the identity provider's
+ * claims. It is read so that an administrator can see who a mapping actually
+ * reached.
+ */
+export const roleGroupMembersKey = (roleGroupId: string): QueryKey => [
+  'admin',
+  'role-group',
+  roleGroupId,
+  'members',
+];
+
 /** Accounts known to the Wiki, filtered by the start of the address. */
 export const directoryKey = (prefix: string): QueryKey => ['admin', 'directory', prefix];
 
@@ -100,6 +114,11 @@ export const grantsQuery = (roleGroupId: string) => ({
 export const attachedUserGroupsQuery = (roleGroupId: string) => ({
   queryKey: attachedUserGroupsKey(roleGroupId),
   queryFn: () => api.listRoleGroupUserGroups(roleGroupId),
+});
+
+export const roleGroupMembersQuery = (roleGroupId: string) => ({
+  queryKey: roleGroupMembersKey(roleGroupId),
+  queryFn: () => api.listRoleGroupMembers(roleGroupId),
 });
 
 type DirectoryPage = Awaited<ReturnType<typeof api.findUsers>>;

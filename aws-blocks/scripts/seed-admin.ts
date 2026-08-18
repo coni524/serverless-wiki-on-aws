@@ -134,8 +134,8 @@ export function adminRecords(userSub: string, at: string): Item[] {
 
 /**
  * A new generation of the permission epoch, shaped exactly like the record
- * `bumpEpoch()` in `access.ts` writes. Duplicated here because importing
- * `access.ts` would drag the whole Lambda runtime into this standalone script.
+ * `bumpEpoch()` in `epoch.ts` writes. Duplicated here because importing
+ * `epoch.ts` would drag the whole Lambda runtime into this standalone script.
  *
  * Without this write, a warm Lambda that has already resolved "no permissions"
  * for this account keeps serving that cached answer until its TTL runs out,

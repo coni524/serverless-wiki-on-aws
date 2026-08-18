@@ -1,17 +1,18 @@
 import { deploy, getStackName } from '@aws-blocks/blocks/scripts';
-import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+import { guardSsoChanges, readStackOutputs, resolveSso, ssoConfigured } from './sso-resolve.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..', '..');
+const stackName = getStackName({ sandbox: false, projectRoot });
 
 /** The stack output holding the address readers open the Wiki at. */
 const HOSTING_URL_OUTPUT = 'HostingHostingUrl';
 
 /**
- * The address this deployment is reached at, read back from the stack that is
- * already running.
+ * The address this deployment is reached at, from the stack's outputs.
  *
  * Two settings need this address, and both go quiet when they do not get it.
  * `MCP_PUBLIC_ORIGIN` has to name the CloudFront distribution, because
@@ -26,35 +27,14 @@ const HOSTING_URL_OUTPUT = 'HostingHostingUrl';
  *
  * The value cannot be resolved inside the CDK app — the Lambda would depend on
  * the distribution, which depends on the API, which depends on the Lambda — so
- * it has to arrive from outside. Leaving that to whoever types the deploy
- * command means a step that is remembered until it isn't, and the deployment
- * that forgets it looks exactly like one that didn't. The stack itself already
- * knows the answer, so this asks the stack.
- *
- * Returns `null` only when there is no stack yet. That is the first deploy, and
- * the address genuinely does not exist until it finishes; this script asks
- * again once it has, and deploys a second time with the answer.
+ * it has to arrive from outside, and the stack itself already knows the answer.
  */
-async function deployedHostingOrigin(): Promise<string | null> {
-  const stackName = getStackName({ sandbox: false, projectRoot });
-  const cloudFormation = new CloudFormationClient({});
-
-  let stacks;
-  try {
-    ({ Stacks: stacks } = await cloudFormation.send(
-      new DescribeStacksCommand({ StackName: stackName }),
-    ));
-  } catch (error) {
-    if (isStackNotFound(error)) return null;
-    throw error;
-  }
-
-  const outputs = stacks?.[0]?.Outputs ?? [];
+function hostingOrigin(outputs: Map<string, string>): string {
   // CDK appends a hash to the output name, so this matches on the prefix. A
   // running stack always has the output; not finding it means the framework
   // renamed it, and failing here is the point — the alternative is deploying
   // without the origin and calling it success.
-  const url = outputs.find((o) => o.OutputKey?.startsWith(HOSTING_URL_OUTPUT))?.OutputValue;
+  const url = [...outputs.entries()].find(([key]) => key.startsWith(HOSTING_URL_OUTPUT))?.[1];
   if (url === undefined || url === '') {
     throw new Error(
       `Stack ${stackName} exists but has no ${HOSTING_URL_OUTPUT}* output. ` +
@@ -66,21 +46,18 @@ async function deployedHostingOrigin(): Promise<string | null> {
   return url.replace(/\/+$/, '');
 }
 
-/** CloudFormation's way of saying the stack has never been deployed. */
-function isStackNotFound(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.name === 'ValidationError' &&
-    error.message.includes('does not exist')
-  );
-}
-
 // An explicit value still wins, and each setting is decided on its own. Pointing
 // a deployment at a custom domain is the case the lookup cannot serve: the stack
 // knows its CloudFront address, not the name someone put in front of it. For
 // `CORS_ALLOWED_ORIGINS` an explicit value also carries the case this cannot
 // guess — it is a comma-separated list, and a deployment may serve the Wiki from
 // somewhere the stack has never heard of.
+// The stub identity provider approves sign-ins without authenticating anybody
+// and belongs to `pnpm run dev` alone. Cleared rather than merely not set, so
+// that an ambient value left in a shell cannot reach a deployed stack — this
+// runs before the CDK app is loaded, which is where `federation.ts` reads it.
+delete process.env.SSO_STUB;
+
 const wantsMcpOrigin = (process.env.MCP_PUBLIC_ORIGIN ?? '') === '';
 const wantsCorsOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '') === '';
 const wantsResolvedOrigin = wantsMcpOrigin || wantsCorsOrigins;
@@ -105,34 +82,47 @@ function runDeploy(): Promise<unknown> {
 }
 
 try {
-  // A stack that is already running knows its address, so a normal deploy needs
-  // one pass. `null` here means there is no stack: this is the first deploy.
-  const originBefore = wantsResolvedOrigin ? await deployedHostingOrigin() : null;
+  const outputsBefore = await readStackOutputs(stackName);
+  await guardSsoChanges(outputsBefore);
+
+  // A stack that is already running knows its answers, so a normal deploy needs
+  // one pass. `null`/`false` here mean the stack (or the SSO surface on it)
+  // does not exist yet: this is the pass that creates it.
+  const originBefore =
+    wantsResolvedOrigin && outputsBefore !== null ? hostingOrigin(outputsBefore) : null;
   if (originBefore !== null) applyOrigin(originBefore);
+  const ssoBefore = ssoConfigured() ? await resolveSso(stackName, outputsBefore) : true;
 
   await runDeploy();
 
-  // The first deploy created the distribution the settings above needed, so
-  // that pass configured the Lambda without them. Rather than leave the second
-  // pass to whoever typed the command — a step that is remembered until it
-  // isn't — this asks the stack that now exists and deploys again. Only the
-  // Lambda's environment changes, so the pass is short. The condition can only
-  // hold once: from here on the stack answers on the first ask.
-  if (wantsResolvedOrigin && originBefore === null) {
-    const origin = await deployedHostingOrigin();
-    if (origin === null) {
+  // The first pass created what the settings above needed, so it configured
+  // the Lambda without them. Rather than leave the second pass to whoever
+  // typed the command — a step that is remembered until it isn't — this asks
+  // the stack that now exists and deploys again. Only the Lambda's
+  // environment changes, so the pass is short. The conditions can only hold
+  // once each: from here on the stack answers on the first ask.
+  const needsSecondPass = (wantsResolvedOrigin && originBefore === null) || !ssoBefore;
+  if (needsSecondPass) {
+    const outputs = await readStackOutputs(stackName);
+    if (outputs === null) {
       throw new Error(
-        'The deploy reported success but the stack cannot be found, so the Wiki address ' +
-          'cannot be read back and the settings that needed it are still unset. MCP clients ' +
-          'would fail to connect, and attachments would be refused in the browser. Run ' +
-          'pnpm run deploy again, or pass MCP_PUBLIC_ORIGIN and CORS_ALLOWED_ORIGINS explicitly.',
+        'The deploy reported success but the stack cannot be found, so the settings that ' +
+          'needed its outputs are still unset. Run pnpm run deploy again, or pass ' +
+          'MCP_PUBLIC_ORIGIN and CORS_ALLOWED_ORIGINS explicitly.',
       );
     }
     console.log(
-      '\n🔁 First deploy: the Wiki address existed only once the run above finished. ' +
-        'Deploying once more to hand it to the Lambda. Later deploys take a single pass.',
+      '\n🔁 First pass done: the values below existed only once the run above finished. ' +
+        'Deploying once more to hand them to the Lambda. Later deploys take a single pass.',
     );
-    applyOrigin(origin);
+    if (wantsResolvedOrigin && originBefore === null) applyOrigin(hostingOrigin(outputs));
+    if (!ssoBefore && !(await resolveSso(stackName, outputs))) {
+      throw new Error(
+        'sso.config.json names identity providers but the deploy produced no UserPoolIssuerUrl / ' +
+          'SsoAuthClientId outputs, so the federation settings cannot be resolved. The stack ' +
+          'and aws-blocks/index.cdk.ts disagree — fix that before deploying SSO.',
+      );
+    }
     await runDeploy();
   }
 } catch (error) {

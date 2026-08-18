@@ -7,6 +7,14 @@ import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { getStackName } from '@aws-blocks/blocks/scripts';
 
+import {
+  ssoCallbackOriginsFromConfig,
+  ssoIdpEntries,
+  ssoLogicalSuffix,
+  ssoProvidersJson,
+  ssoSecretName,
+} from './sso-config.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = new cdk.App();
@@ -46,6 +54,16 @@ const corpusBucketName = `sl-wiki-search-corpus-${createHash('sha256')
   .digest('hex')
   .slice(0, 16)}`;
 process.env.SEARCH_CORPUS_BUCKET = corpusBucketName;
+
+// ─── External identity providers: the configured entries ─────────────────────
+// Parsed once, before the backend import below, because `federation.ts` runs
+// during that import and reads `SSO_PROVIDERS` to declare one sign-in provider
+// per entry. The registration of each IdP on the pool sits further down,
+// beside the pool it registers on.
+const ssoEntries = ssoIdpEntries({ sandbox: sandboxMode });
+if (ssoEntries.length > 0) {
+  process.env.SSO_PROVIDERS = ssoProvidersJson(ssoEntries);
+}
 
 export const blocksStack = await BlocksStack.create(app, stackName, {
   backendHandlerPath: join(__dirname, 'index.handler.ts'),
@@ -137,6 +155,31 @@ blocksStack.handler.addToRolePolicy(
   }),
 );
 
+// ─── External identity provider: what the runtime reads ──────────────────────
+// `federation.ts` reads these when it decides whether to declare an OIDC
+// provider, and that decision is made twice: once here during synth, which is
+// what creates the sign-in routes, and once in the Lambda, which is what serves
+// them. Both readings must agree, so whatever the deploy script resolved is
+// forwarded into the function's environment. `SSO_ISSUER_URL` names this
+// stack's own user pool — the deploy scripts derive it from the pool id — and
+// the registration that puts the external IdP behind that pool sits further
+// down, beside the pool it registers on.
+//
+// The credentials are not here. They live in SSM as `AppSetting`s the runtime
+// resolves, so rotating them is a parameter write rather than a deploy.
+for (const name of ['SSO_ISSUER_URL', 'SSO_PROVIDERS', 'SSO_GROUPS_CLAIM', 'SSO_SCOPES']) {
+  const value = process.env[name];
+  if (value !== undefined && value.trim() !== '') {
+    blocksStack.handler.addEnvironment(name, value.trim());
+  }
+}
+
+// `SSO_STUB` is deliberately not forwarded, and must never be. It stands up an
+// in-process identity provider that approves sign-ins without authenticating
+// anybody — a way in for whoever can reach it. `federation.ts` refuses it
+// inside Lambda as well; this is the other half of the same rule, placed where
+// somebody adding a variable to the loop above would have to read it.
+
 // ─── MCP server: the Cognito OAuth surface ───────────────────────────────────
 // The MCP server itself is a `RawRoute` on this same Lambda and needs nothing
 // here. What it does need is a user pool that can act as an OAuth authorization
@@ -222,6 +265,139 @@ const mcpDomain = userPool.addDomain('McpSignInDomain', {
   // with no extra resource is the one used.
   cognitoDomain: { domainPrefix: mcpDomainPrefix },
 });
+// One domain, two doors. Besides the MCP OAuth flow it is named for, this
+// domain is what the pool's OIDC discovery document publishes as its
+// authorization and token endpoints — which is what lets the AuthOIDC block in
+// `federation.ts` point at the pool as an ordinary OIDC issuer. The external
+// IdP registration below rides on it too: the IdP redirects back to
+// `<domain>/oauth2/idpresponse`.
+
+// ─── External identity provider: registration on the pool ───────────────────
+// The company IdP — Entra, Okta, OneLogin — is registered *on the pool*, not
+// talked to by the application. Sign-in flows browser → pool hosted UI → IdP →
+// back to the pool (which creates the federated account as a pool user) → the
+// AuthOIDC callback. That is what makes a federated user a Cognito user: MCP
+// and `/ext/*` Bearer auth work for them unchanged, and every identifier is
+// the pool's `sub`.
+//
+// Everything here describes the IdP's shape and is deploy-time, like
+// `SSO_ISSUER_URL` above. The one secret — the IdP's client secret — never
+// touches the template: CloudFormation resolves it at deploy through a
+// dynamic reference, so the operator writes it once and no file ever carries
+// it. Secrets Manager, not the `ssm-secure` reference every other secret here
+// uses, because CloudFormation only honours `ssm-secure` on a short list of
+// resources that does not include `UserPoolIdentityProvider` — it would store
+// the literal `{{resolve:...}}` text as the client secret and fail only at
+// sign-in. A `secretsmanager` reference works in any property, at the cost of
+// one $0.40/month secret that exists only while SSO does.
+// One registration and one app client per entry. The client is what keeps the
+// hosted UI from drawing its chooser: a client whose
+// `supportedIdentityProviders` names a single IdP forwards straight to it, so
+// each provider gets a client of its own and every sign-in goes direct. The
+// entries came from `ssoIdpEntries()` above; the primary entry keeps the
+// logical ids, names and outputs of the single-IdP days, which is what lets a
+// running deployment take this change with an empty diff.
+const ssoRegistrations = ssoEntries.map((entry) => {
+  const suffix = ssoLogicalSuffix(entry);
+  const idp = new cdk.aws_cognito.UserPoolIdentityProviderOidc(blocksStack, `SsoIdp${suffix}`, {
+    userPool,
+    // The registration name becomes part of federated usernames
+    // (`<name>_<sub>`), so changing it later orphans every federated account —
+    // pick once.
+    name: entry.registrationName,
+    clientId: entry.clientId,
+    // The secret name matches the AppSetting naming convention
+    // (`<stack>-sl-wiki-…`) so the operator finds all of a stack's SSO secrets
+    // by one prefix. Not an AppSetting itself: the runtime never reads it,
+    // only CloudFormation does.
+    clientSecret: `{{resolve:secretsmanager:${ssoSecretName(entry, stackName)}}}`,
+    issuerUrl: entry.issuerUrl,
+    scopes: entry.scopes,
+    attributeMapping: {
+      // Email is the pool's sign-in identifier and display address, so the
+      // federated account must carry one from its first sign-in.
+      email: cdk.aws_cognito.ProviderAttribute.other('email'),
+      custom: {
+        // Whatever the IdP calls its group claim, it lands in the one custom
+        // attribute the runtime reads — the per-IdP difference ends here.
+        'custom:groups': cdk.aws_cognito.ProviderAttribute.other(entry.groupsClaim),
+      },
+    },
+  });
+
+  // The app client the AuthOIDC block signs this entry's users in through.
+  // Confidential (`generateSecret`) because the pool's token endpoint refuses
+  // public clients with no PKCE, and the block is a server-side caller that
+  // can hold a secret — the deploy script reads the generated value back and
+  // stores it as the entry's `sso-client-id*` / `sso-client-secret*`
+  // AppSettings the runtime resolves.
+  //
+  // `supportedIdentityProviders` names only this entry's IdP, deliberately
+  // omitting `COGNITO`: password accounts keep signing in through the app's
+  // own form (`AuthCognito`), never this client.
+  const callbackUrls = sandboxMode
+    ? // The sandbox front door: the frontend runs on localhost and proxies
+      // `/aws-blocks/*` to the deployed API, so this is the origin the
+      // callback comes back to.
+      ['http://localhost:3000/aws-blocks/auth/callback']
+    : ssoCallbackOrigins().map((origin) => `${origin}/aws-blocks/auth/callback`);
+  const client = userPool.addClient(`SsoAuthClient${suffix}`, {
+    userPoolClientName: entry.primary ? 'sl-wiki-sso' : `sl-wiki-sso-${entry.providerName}`,
+    generateSecret: true,
+    authFlows: {
+      user: false,
+      userPassword: false,
+      userSrp: false,
+      custom: false,
+      adminUserPassword: false,
+    },
+    oAuth: {
+      flows: { authorizationCodeGrant: true },
+      scopes: [
+        cdk.aws_cognito.OAuthScope.OPENID,
+        cdk.aws_cognito.OAuthScope.EMAIL,
+        cdk.aws_cognito.OAuthScope.PROFILE,
+      ],
+      callbackUrls,
+    },
+    supportedIdentityProviders: [
+      cdk.aws_cognito.UserPoolClientIdentityProvider.custom(entry.registrationName),
+    ],
+    preventUserExistenceErrors: true,
+    enableTokenRevocation: true,
+    accessTokenValidity: cdk.Duration.hours(1),
+    // Matches the AuthOIDC session's own 30-day horizon — a refresh token that
+    // outlives the session it serves would just be an unusable credential.
+    refreshTokenValidity: cdk.Duration.days(30),
+  });
+  // `custom()` above is a plain string to CloudFormation, so nothing tells it
+  // the client needs the IdP to exist first. Without this the first deploy
+  // races and fails on "provider does not exist".
+  client.node.addDependency(idp);
+  return { entry, idp, client, suffix };
+});
+
+/**
+ * The origins whose `/aws-blocks/auth/callback` the pool may redirect back to.
+ *
+ * Cognito matches redirect URIs exactly, so the deployed origin must be known
+ * at synth. The deploy script resolves it from the running stack (the same
+ * lookup that fills `MCP_PUBLIC_ORIGIN`), and the file's `callbackOrigins`
+ * exists for the case the lookup cannot serve — a custom domain in front, or
+ * a developer registering `http://localhost:3000` to run the flow locally.
+ */
+function ssoCallbackOrigins(): string[] {
+  const explicit = ssoCallbackOriginsFromConfig();
+  if (explicit.length > 0) return explicit;
+  const resolved = (process.env.MCP_PUBLIC_ORIGIN ?? '').trim().replace(/\/+$/, '');
+  if (resolved !== '') return [resolved];
+  throw new Error(
+    'SSO is configured (sso.config.json) but no callback origin is known. The deploy script ' +
+      'resolves one from the running stack; deploying a brand-new stack with SSO in the same ' +
+      'command is the one case it cannot serve. Deploy once with the idps emptied, then again ' +
+      'with them — or set callbackOrigins in sso.config.json explicitly.',
+  );
+}
 
 const mcpReadScope = new cdk.aws_cognito.ResourceServerScope({
   scopeName: 'read',
@@ -274,11 +450,24 @@ const mcpClient = userPool.addClient('McpClient', {
       OBSIDIAN_CALLBACK_URL,
     ],
   },
+  // Named explicitly rather than left to CDK's auto-detection, whose answer
+  // depends on construct order. `COGNITO` serves password accounts; the
+  // external IdP entries are what let a federated user authorize an MCP client
+  // at the same hosted screen. With more than one entry the hosted UI draws
+  // its chooser here — accepted, because MCP sign-in runs on the classic
+  // hosted UI anyway and the chooser is the only way to say which IdP.
+  supportedIdentityProviders: [
+    cdk.aws_cognito.UserPoolClientIdentityProvider.COGNITO,
+    ...ssoRegistrations.map(({ entry }) =>
+      cdk.aws_cognito.UserPoolClientIdentityProvider.custom(entry.registrationName),
+    ),
+  ],
   preventUserExistenceErrors: true,
   enableTokenRevocation: true,
   accessTokenValidity: cdk.Duration.hours(1),
   refreshTokenValidity: cdk.Duration.days(30),
 });
+for (const { idp } of ssoRegistrations) mcpClient.node.addDependency(idp);
 
 blocksStack.handler.addEnvironment('MCP_USER_POOL_ID', userPool.userPoolId);
 blocksStack.handler.addEnvironment('MCP_CLIENT_ID', mcpClient.userPoolClientId);
@@ -326,6 +515,27 @@ new cdk.CfnOutput(blocksStack, 'ObsidianCallbackUrl', {
   value: OBSIDIAN_CALLBACK_URL,
   description: 'Redirect URI the Obsidian sync plugin must register',
 });
+
+// Unconditional, though only federation reads it: the deploy script derives
+// `SSO_ISSUER_URL` from this output *before* the SSO-enabling deploy runs, so
+// it has to be on the stack already by the time an operator turns SSO on.
+new cdk.CfnOutput(blocksStack, 'UserPoolIssuerUrl', {
+  value: userPool.userPoolProviderUrl,
+  description: 'The pool as an OIDC issuer — what the deploy script sets SSO_ISSUER_URL to',
+});
+for (const { entry, client, suffix } of ssoRegistrations) {
+  new cdk.CfnOutput(blocksStack, `SsoAuthClientId${suffix}`, {
+    value: client.userPoolClientId,
+    description: `Federation app client (${entry.providerName}) — the deploy script stores its credentials as AppSettings`,
+  });
+}
+if (ssoRegistrations.length > 0) {
+  // One value for every IdP: the redirect target is the pool, not the entry.
+  new cdk.CfnOutput(blocksStack, 'SsoIdpRedirectUri', {
+    value: `${mcpDomain.baseUrl()}/oauth2/idpresponse`,
+    description: 'Redirect URI to register at the external IdP',
+  });
+}
 
 // Add static site hosting only when deploying (not in sandbox mode)
 if (!sandboxMode) {

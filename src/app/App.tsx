@@ -10,10 +10,16 @@ import TopNavigation, {
   type TopNavigationProps,
 } from '@cloudscape-design/components/top-navigation';
 import Link from '@cloudscape-design/components/link';
+import Button from '@cloudscape-design/components/button';
 import { ErrorText, Loading } from '@/components/ui';
 import { errMessage } from '@/utils/errors';
 import type { Me, NodeKind } from '@/types/api';
 import { useMe } from '@/features/auth/api/identity';
+import {
+  FEDERATED_SIGN_OUT_URL,
+  signInUrl,
+  useAuthProviders,
+} from '@/features/auth/api/providers';
 import { clearAttachmentCache } from '@/features/pages/api/attachment-cache';
 import { dropServerState, resetServerState } from '@/features/pages/api/page-cache';
 import { LOCALES, LOCALE_NAMES, useLocale, useT, type Locale } from '@/lib/i18n';
@@ -126,20 +132,55 @@ export function App() {
       setUser(next);
     };
 
-    void authApi
-      .getAuthState()
-      .then((state) => {
-        settled = true;
-        apply(state.user ? { username: state.user.username } : null);
-      })
-      .catch(() => {
-        settled = true;
-        apply(null);
-      });
+    /**
+     * Who is signed in, across both kinds of session.
+     *
+     * The auth block only knows about the password session it issues itself. A
+     * reader who came in through the company's identity provider holds the
+     * other kind, which that block cannot see and would report as signed out —
+     * so when it says nobody is here, the server is asked directly. `me()`
+     * succeeds for either session and refuses for neither, which makes it the
+     * one answer that covers both doors.
+     */
+    const whoIsSignedIn = async (): Promise<{ username: string } | null> => {
+      const state = await authApi.getAuthState().catch(() => null);
+      if (state?.user) return { username: state.user.username };
+      const me = await api.me().catch(() => null);
+      // The address, not the identifier: the identifier is the pool's opaque
+      // `sub`, which is what the account menu would otherwise greet the reader
+      // by. It still keys the caches, and it is still per-account unique.
+      return me ? { username: me.email === '' ? me.userId : me.email } : null;
+    };
 
+    void whoIsSignedIn().then((next) => {
+      settled = true;
+      apply(next);
+    });
+
+    // Every emission takes a ticket, and an async answer is applied only while
+    // its ticket is still the newest. The sign-in form broadcasts `null` on
+    // every intermediate challenge step (password accepted, TOTP still to
+    // come), and the re-ask that null starts runs before the session cookie
+    // exists — so it can resolve *after* the success broadcast that follows,
+    // and without the ticket its stale signed-out answer would overwrite the
+    // signed-in shell. Same discipline as `live` above, for a different way an
+    // answer goes stale.
+    let ticket = 0;
     const unsubscribe = onAuthChange(authApi, (next) => {
       if (!settled) return;
-      apply(next ? { username: next.username } : null);
+      const mine = ++ticket;
+      // A non-null emission is a password sign-in and settles it. A null one
+      // only says the *password* session ended, which for a federated reader is
+      // the state they were in all along — so that case is re-asked rather than
+      // taken at face value, or signing out in another tab would throw this one
+      // back to the sign-in screen while its session is still good.
+      if (next) {
+        apply({ username: next.username });
+        return;
+      }
+      void whoIsSignedIn().then((answer) => {
+        if (ticket === mine) apply(answer);
+      });
     });
 
     return () => {
@@ -221,7 +262,20 @@ export function App() {
   const identity = useMe(signedIn);
 
   const signOut = useCallback(async () => {
-    // The sign-out itself is still the auth block's own state machine — only
+    // Both sessions are ended, not the one this reader appears to hold. Which
+    // kind they hold is a server-side fact this shell only learns second-hand,
+    // and a sign-out that leaves the other kind standing is a reader who
+    // pressed "Sign out" and stayed signed in. Ending a session that does not
+    // exist is a no-op on both sides, so asking twice costs a request and
+    // removes the need to be right.
+    //
+    // The federated one first: it is a plain route rather than part of the
+    // block's state machine, and a failure to reach it must not stop the
+    // password sign-out that follows.
+    await fetch(FEDERATED_SIGN_OUT_URL, { method: 'POST', credentials: 'include' }).catch(
+      () => undefined,
+    );
+    // The password sign-out is still the auth block's own state machine — only
     // the menu that triggers it is ours. The block broadcasts from its own UI,
     // so this path has to announce the change or the shell keeps the stale user.
     await authApi.setAuthState({ action: 'signOut' });
@@ -504,10 +558,24 @@ function SignedIn({
   }
 }
 
-/** The signed-out screen: the auth block's own form, framed by the shell. */
+/**
+ * The signed-out screen: the password form, and a button per configured IdP.
+ *
+ * The federated button is a plain link, not a call. Signing in through an
+ * identity provider is a redirect out to it and back, so the page has to leave
+ * — and the route it leaves to is the backend's, which is why nothing here
+ * awaits a result.
+ *
+ * The password form stays regardless. A deployment with an IdP still has
+ * Cognito accounts in it — the operator's own among them — and the screen that
+ * only offered the IdP would lock them out the first time the IdP was
+ * misconfigured, which is the one moment it must not.
+ */
 function SignIn() {
   const t = useT();
   const formRef = useRef<HTMLDivElement>(null);
+  const providers = useAuthProviders();
+  const federated = providers.data?.providers ?? [];
 
   useEffect(() => {
     const container = formRef.current;
@@ -526,6 +594,23 @@ function SignIn() {
       <Container header={<Header variant="h2">{t.app.signInHeading}</Header>}>
         <SpaceBetween size="s">
           <span>{t.app.signInPrompt}</span>
+          {federated.map((provider) => (
+            <Button
+              key={provider.name}
+              variant="primary"
+              href={signInUrl(provider.name)}
+              // Cloudscape renders an anchor when given `href`, but intercepts
+              // the click to keep single-page apps on the page. This one must
+              // leave it.
+              onFollow={(event) => {
+                event.preventDefault();
+                window.location.assign(signInUrl(provider.name));
+              }}
+            >
+              {t.app.signInWithProvider(provider.label)}
+            </Button>
+          ))}
+          {federated.length > 0 && <span>{t.app.signInOrPassword}</span>}
           {/* The block returns DOM nodes, not React elements, so its form is
               mounted by hand. */}
           <div ref={formRef} />

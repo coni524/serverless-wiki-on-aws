@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
@@ -69,6 +70,20 @@ export function AdminUsers() {
             header: t.admin.shared.email,
             cell: (user) => user.email,
             isRowHeader: true,
+          },
+          {
+            id: 'source',
+            header: t.admin.users.source,
+            // Which door the account comes in by, because it decides what an
+            // administrator can do about its permissions: a federated account's
+            // role groups are rewritten from its identity provider on every
+            // sign-in, so they are changed there and not here.
+            cell: (user) =>
+              user.identityProvider === null ? (
+                <Box color="text-body-secondary">{t.admin.users.sourcePassword}</Box>
+              ) : (
+                <Badge color="blue">{user.identityProvider}</Badge>
+              ),
           },
           {
             id: 'userId',

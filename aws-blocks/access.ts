@@ -14,11 +14,12 @@ import { ApiError, isBlocksError, type BlocksContext } from '@aws-blocks/core';
 import { DistributedTableErrors } from '@aws-blocks/blocks';
 
 import { auth, table } from './resources.js';
+import { readEpoch } from './epoch.js';
+import { canonicalUserId, oidcAuth } from './federation.js';
 import {
   ALL_SPACES,
   ALL_USERS,
   CONFIG_DEFAULTS,
-  CONFIG_EPOCH,
   CONFIG_PK,
   META,
   PROFILE,
@@ -35,6 +36,15 @@ import {
 } from './model.js';
 
 export type SignedInUser = {
+  /**
+   * Whose permissions apply.
+   *
+   * The pool's `sub`, whichever door the account came through: a password
+   * sign-in reads it from the Cognito session, and a federated sign-in's
+   * `${iss}:${sub}` is folded back to the same `sub` at the door
+   * (`canonicalUserId`), because a federated account is a pool account too.
+   * Opaque everywhere below this line: just the string after `USER#`.
+   */
   userSub: string;
   /**
    * Display value. Mutable during employment, never an identifier.
@@ -45,6 +55,13 @@ export type SignedInUser = {
    * that did was removed).
    */
   email: string;
+  /**
+   * Which external IdP signed this account in, absent for a Cognito account.
+   *
+   * Carried so the management screens can tell the two apart. It is never an
+   * input to a permission decision — those read the edges in DynamoDB.
+   */
+  identityProvider?: string;
 };
 
 export type Access = {
@@ -152,48 +169,6 @@ const WALK_CACHE_TRIM_TO = 400;
 /** Lives as long as this execution environment does; nothing can reach in. */
 const walkCache = new Map<string, CachedWalk>();
 
-/**
- * The current generation, or `null` when it could not be read.
- *
- * This one read sits in front of every authorized request, so a failure here
- * must not be a failure of the request. `null` means "no generation to compare
- * against": the caller skips the stored answer and resolves all three hops, which
- * is what every request did before this cache existed. The check is never
- * loosened — an answer is still only reused when a generation was read and it
- * matched — so a degraded read costs queries and never permissions.
- *
- * If the table is unreachable rather than this key, the hops fail on their own
- * and the request fails there, which is the fail-closed outcome.
- */
-async function readEpoch(): Promise<string | null> {
-  try {
-    const item = await table.get({ pk: CONFIG_PK, sk: CONFIG_EPOCH });
-    // No record yet is a generation of its own, so a fresh deployment does not
-    // have to write one before anybody can be authorized.
-    return item?.epoch ?? '';
-  } catch (reason) {
-    console.warn('[sl-wiki] Could not read the permission epoch; resolving in full.', reason);
-    return null;
-  }
-}
-
-/**
- * Move the permission graph to a new generation.
- *
- * Called at the end of every method that writes or removes a permission edge or
- * a role group. The value is opaque — compared only for equality — so
- * a last-writer-wins `put` is enough, and no counter has to be read, incremented,
- * and written back under an optimistic lock.
- */
-export async function bumpEpoch(): Promise<void> {
-  await table.put({
-    pk: CONFIG_PK,
-    sk: CONFIG_EPOCH,
-    type: 'EPOCH',
-    epoch: `${new Date().toISOString()}#${crypto.randomUUID()}`,
-  });
-}
-
 /** The stored answer for this user, if it is still of the current generation. */
 function cachedWalk(userSub: string, epoch: string | null): CachedWalk | undefined {
   if (epoch === null) return undefined;
@@ -299,10 +274,51 @@ export function requireAccess(context: BlocksContext): Promise<Access> {
   return resolving;
 }
 
+/**
+ * Which of the two doors this request came through, and as whom.
+ *
+ * A deployment can have both open: `AuthCognito` for accounts holding a
+ * password, `AuthOIDC` for accounts a company's IdP issued. They keep separate
+ * sessions and separate cookies, so the only way to know is to ask each.
+ *
+ * Cognito is asked first because it is the door every deployment has — one
+ * without an external IdP never reaches the second question at all. On a
+ * federated deployment this costs one session lookup that misses before the one
+ * that hits; `requireAccess` memoizes per request, so it is paid once.
+ *
+ * Both refusals are the same refusal. When neither session exists the Cognito
+ * block is asked to raise it, so a signed-out client sees exactly the error it
+ * saw before federation existed.
+ */
+async function whoIsSignedIn(context: BlocksContext): Promise<SignedInUser> {
+  const cognitoUser = await auth.getCurrentUser(context);
+  if (cognitoUser !== null) {
+    return {
+      userSub: cognitoUser.userSub,
+      email: cognitoUser.attributes.email ?? cognitoUser.username,
+    };
+  }
+
+  if (oidcAuth !== null) {
+    const federated = await oidcAuth.getCurrentUser(context);
+    if (federated !== null) {
+      return {
+        userSub: canonicalUserId(federated.userId),
+        email: federated.email ?? federated.username,
+        identityProvider: federated.provider,
+      };
+    }
+  }
+
+  const refused = await auth.requireAuth(context);
+  // Unreachable: `requireAuth` throws whenever `getCurrentUser` returned null.
+  // Kept so the function has one return type rather than a cast.
+  return { userSub: refused.userSub, email: refused.username };
+}
+
 async function resolveAccess(context: BlocksContext): Promise<Access> {
-  const cognitoUser = await auth.requireAuth(context);
-  const userSub = cognitoUser.userSub;
-  const email = cognitoUser.attributes.email ?? cognitoUser.username;
+  const signedIn = await whoIsSignedIn(context);
+  const { userSub, email } = signedIn;
 
   const epoch = await readEpoch();
   const cached = cachedWalk(userSub, epoch);
@@ -310,7 +326,7 @@ async function resolveAccess(context: BlocksContext): Promise<Access> {
   // previous request already found the profile, and no API deletes one. What it
   // does defer is the display-address sync below, by at most the backstop TTL —
   // nothing gates on that address.
-  if (cached !== undefined) return accessFrom({ userSub, email }, cached);
+  if (cached !== undefined) return accessFrom(signedIn, cached);
 
   // ── Hop 1: profile + memberships ──
   let own = await Array.fromAsync(table.query({ where: { pk: { equals: userPk(userSub) } } }));
@@ -318,18 +334,18 @@ async function resolveAccess(context: BlocksContext): Promise<Access> {
 
   let provisioned = false;
   if (profile === undefined) {
-    await provisionUser(userSub, email);
+    await provisionUser(signedIn);
     provisioned = true;
     own = await Array.fromAsync(table.query({ where: { pk: { equals: userPk(userSub) } } }));
     profile = own.find((item) => item.type === 'USER');
   } else if (profile.email !== email) {
-    // The address is the Cognito username and can change during employment.
-    // Keep the display copy current; a lost race just means the
+    // The address is the sign-in identity's own and can change during
+    // employment. Keep the display copy current; a lost race just means the
     // next request rewrites it.
     await syncEmail(profile, email);
   }
 
-  const access = await walkGroups({ userSub, email }, own);
+  const access = await walkGroups(signedIn, own);
   // A just-provisioned user is not stored. Provisioning may have written a
   // membership (the default user group) and the re-query above reads
   // it back through an eventually consistent query — if that read misses its own
@@ -366,7 +382,11 @@ export async function accessForUser(userSub: string): Promise<Access> {
   const own = await Array.fromAsync(table.query({ where: { pk: { equals: userPk(userSub) } } }));
   const profile = own.find((item) => item.type === 'USER');
   if (profile === undefined) forbidden('Unknown user');
-  const user: SignedInUser = { userSub, email: profile.email ?? '' };
+  const user: SignedInUser = {
+    userSub,
+    email: profile.email ?? '',
+    identityProvider: profile.identityProvider,
+  };
 
   const cached = cachedWalk(userSub, epoch);
   if (cached !== undefined) return accessFrom(user, cached);
@@ -376,10 +396,25 @@ export async function accessForUser(userSub: string): Promise<Access> {
   return access;
 }
 
-/** Hops 2 and 3, shared by both entry points. `own` is the user's partition. */
+/**
+ * Hops 2 and 3, shared by both entry points. `own` is the user's partition.
+ *
+ * Two kinds of edge leave a user. `MEMBERSHIP` names a user group and needs hop
+ * 2 to reach the role groups attached to it. `ROLE_MEMBERSHIP` names a role
+ * group outright and skips straight to hop 3 — that is the shape an external
+ * IdP's groups are written in, because the IdP already *is* the layer that
+ * groups people, and repeating it here would mean maintaining the same sets
+ * twice.
+ *
+ * Both feed one set of role group ids, so hop 3 and everything after it cannot
+ * tell which kind of edge a permission arrived by.
+ */
 async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
   const userGroupIds = own
     .filter((item) => item.type === 'MEMBERSHIP')
+    .map((item) => idOf(item.sk));
+  const directRoleGroupIds = own
+    .filter((item) => item.type === 'ROLE_MEMBERSHIP')
     .map((item) => idOf(item.sk));
 
   // ── Hop 2: user groups → role groups ──
@@ -392,7 +427,9 @@ async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
       ),
     ),
   );
-  const roleGroupIds = [...new Set(attachments.flat().map((item) => idOf(item.sk)))];
+  const roleGroupIds = [
+    ...new Set([...directRoleGroupIds, ...attachments.flat().map((item) => idOf(item.sk))]),
+  ];
 
   // ── Hop 3: role groups → grants ──
   const roleGroups = await Promise.all(
@@ -417,10 +454,15 @@ async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
 /**
  * Create the directory record for an account signing in for the first time.
  *
- * Cognito owns the accounts and AuthCognito exposes no way to enumerate them,
- * so the directory is filled in here rather than at account creation.
+ * Cognito owns the password accounts and AuthCognito exposes no way to
+ * enumerate them, so the directory is filled in here rather than at account
+ * creation. A federated account normally has its record written a moment
+ * earlier, by the sign-in hook in `federation.ts`; this path still covers it,
+ * because a session outlives the sign-in that created it and the directory row
+ * could have been deleted since.
  */
-async function provisionUser(userSub: string, email: string): Promise<void> {
+async function provisionUser(user: SignedInUser): Promise<void> {
+  const { userSub, email, identityProvider } = user;
   const now = new Date().toISOString();
   await table.put(
     {
@@ -430,11 +472,21 @@ async function provisionUser(userSub: string, email: string): Promise<void> {
       gsi1pk: ALL_USERS,
       gsi1sk: sortable(email),
       email,
+      ...(identityProvider !== undefined ? { identityProvider } : {}),
       createdAt: now,
       version: 0,
     },
     { ifNotExists: true },
   ).catch(swallowConditionalFailure);
+
+  // The default user group is a Wiki-side grant, so it is only handed to
+  // Wiki-side accounts. A federated account's permissions come from its IdP's
+  // groups and nowhere else; adding one here would be a permission the IdP
+  // never granted and the administrator cannot see the origin of. A deployment
+  // that wants every federated employee to reach a space maps an IdP group
+  // everyone belongs to onto a role group, which says the same thing in the
+  // one place that owns the answer.
+  if (identityProvider !== undefined) return;
 
   const defaults = await table.get({ pk: CONFIG_PK, sk: CONFIG_DEFAULTS });
   const defaultUserGroupId = defaults?.defaultUserGroupId;

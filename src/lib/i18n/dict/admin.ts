@@ -42,11 +42,13 @@ export const ja = {
     description:
       'Wiki に一度でもサインインしたアカウント。Cognito のアカウントそのものは AWS 側で管理する。',
     userId: '利用者 ID',
+    source: 'サインインの経路',
+    sourcePassword: 'パスワード',
     empty: 'サインインしたアカウントがまだありません。',
     emptyFiltered: (prefix: string): string => `「${prefix}」で始まるアドレスは見つかりませんでした。`,
     grantingHeader: '権限の与え方',
     grantingBody:
-      '利用者に直接権限を与える経路はない。利用者をユーザーグループに入れ、そのユーザーグループにロールグループを付け、ロールグループにスペースの権限を与える、という 3 段でつなぐ。所属の変更は「ユーザーグループ」の画面で行う。',
+      '利用者に直接権限を与える経路はない。利用者をユーザーグループに入れ、そのユーザーグループにロールグループを付け、ロールグループにスペースの権限を与える、という 3 段でつなぐ。所属の変更は「ユーザーグループ」の画面で行う。外部 IdP（認証情報の提供元）でサインインした利用者は、この 3 段ではなく IdP のグループから直接ロールグループへつながる。その割り当てはサインインのたびに IdP 側の内容へ書き換わるので、変更は IdP 側で行う。',
   },
 
   // ─── User groups ───────────────────────────────────────────────────────────
@@ -117,6 +119,24 @@ export const ja = {
     attachedDescription:
       'このロールグループが付いているユーザーグループ。付け外しはユーザーグループの画面で行う。',
     attachedEmpty: 'どのユーザーグループにも付いていない。誰にも届いていない。',
+
+    /** The IdP groups that reach this role group, and who they reached. */
+    idpGroupHeader: '外部 IdP のグループとの対応',
+    idpGroupDescription:
+      '選んだ IdP（認証情報の提供元）でそのグループに入っている利用者が、サインインしたときにこのロールグループへ届く。届くのは各利用者の次回のサインインからである。行はどの IdP のグループかまで指定する。ここを書き換えるか空にすると、いまつながっている利用者はその場で全員外れる。',
+    idpGroupProviderPlaceholder: 'IdP を選ぶ',
+    idpGroupPlaceholder: '例: wiki-editors',
+    idpGroupUnset: '対応づけていない',
+    idpGroupGlobalNote:
+      'グローバル管理者のロールグループは IdP のグループと対応づけられない。Wiki の外の設定変更だけで全スペースの管理者が増える経路を作らないためである。',
+    idpGroupAdd: '対応を追加',
+    idpGroupRemove: '削除',
+    idpGroupSave: '保存',
+
+    membersHeader: '直接届いている利用者',
+    membersDescription:
+      '上の対応づけによって、サインイン時にこのロールグループへ直接つながった利用者。この一覧はサインインが書き換えるので、ここからは編集できない。外すときは IdP 側のグループから外す。',
+    membersEmpty: '直接つながっている利用者はいない。',
   },
 
   // ─── The default user group ────────────────────────────────────────────────
@@ -162,11 +182,13 @@ export const en: Admin = {
     description:
       'Accounts that have signed in to the Wiki at least once. The Cognito accounts themselves are managed on the AWS side.',
     userId: 'User ID',
+    source: 'Signs in with',
+    sourcePassword: 'Password',
     empty: 'No account has signed in yet.',
     emptyFiltered: (prefix: string): string => `No address starting with "${prefix}" was found.`,
     grantingHeader: 'How permissions are granted',
     grantingBody:
-      'There is no way to grant permission to a user directly. Put the user in a user group, attach a role group to that user group, and grant space permissions to the role group — three hops. Memberships are edited on the "User groups" screen.',
+      'There is no way to grant permission to a user directly. Put the user in a user group, attach a role group to that user group, and grant space permissions to the role group — three hops. Memberships are edited on the "User groups" screen. A user who signed in through an external identity provider skips those hops: their IdP groups connect straight to role groups. That assignment is rewritten from the IdP on every sign-in, so change it at the IdP.',
   },
 
   userGroups: {
@@ -241,6 +263,23 @@ export const en: Admin = {
     attachedDescription:
       'The user groups this role group is attached to. Attach and detach on the user group screen.',
     attachedEmpty: 'Not attached to any user group. It reaches nobody.',
+
+    idpGroupHeader: 'Mapping to external IdP groups',
+    idpGroupDescription:
+      'Users in the named group at the chosen identity provider reach this role group when they sign in, from their next sign-in onwards. Each row names which IdP the group belongs to. Changing or clearing these rows disconnects everyone currently connected, immediately.',
+    idpGroupProviderPlaceholder: 'Choose an IdP',
+    idpGroupPlaceholder: 'e.g. wiki-editors',
+    idpGroupUnset: 'Not mapped to any IdP group.',
+    idpGroupGlobalNote:
+      'The global administrator role group cannot be mapped to an IdP group. Doing so would make administrators of every space appear through a change made outside this Wiki.',
+    idpGroupAdd: 'Add mapping',
+    idpGroupRemove: 'Remove',
+    idpGroupSave: 'Save',
+
+    membersHeader: 'Users reached directly',
+    membersDescription:
+      'Users the mapping above connected straight to this role group when they signed in. A sign-in writes this list, so it cannot be edited here — remove someone from the group at the identity provider instead.',
+    membersEmpty: 'No user is connected directly.',
   },
 
   defaults: {

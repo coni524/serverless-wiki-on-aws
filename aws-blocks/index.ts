@@ -92,9 +92,10 @@ import { withoutDiscardedReplies } from './transcript.js';
 // up the MCP server, and a route only exists once its construct is built.
 // Nothing here calls into it.
 import './mcp.js';
+import { bumpEpoch } from './epoch.js';
+import { federationProviders } from './federation.js';
 import {
   type Access,
-  bumpEpoch,
   conflict,
   forbidden,
   invalid,
@@ -142,6 +143,16 @@ const asGroup = (item: Item) => ({
   description: item.description ?? '',
   system: item.system === true,
   global: item.global === true,
+  /**
+   * The external IdP groups whose members reach this role group, each naming
+   * the provider whose claim is trusted for it.
+   *
+   * Role groups only. A user group never carries one: the IdP is the thing that
+   * groups people, so its groups map onto what people may *do*, not onto a
+   * second grouping of the same people.
+   */
+  idpGroups: item.idpGroups ?? [],
+  version: item.version ?? 0,
 });
 
 // No `displayName`: nothing writes one yet, so returning it would promise a
@@ -149,6 +160,14 @@ const asGroup = (item: Item) => ({
 const asUser = (item: Item) => ({
   userId: idOf(item.pk),
   email: item.email ?? '',
+  /**
+   * Which external IdP issued this account, or `null` for a password account.
+   *
+   * The management screens read it to decide what they may offer: a federated
+   * account's role groups are rewritten from its IdP's claims on every sign-in,
+   * so presenting them as editable would promise an edit that does not last.
+   */
+  identityProvider: item.identityProvider ?? null,
 });
 
 /**
@@ -325,16 +344,36 @@ function cleanApprovalDecisions(responses: ApprovalDecision[]): ApprovalDecision
 export const api = new ApiNamespace(scope, 'api', (context) => ({
 
   /**
+   * Which ways in this deployment offers, before anyone has come in.
+   *
+   * The only method in this namespace that does not authenticate, and it has to
+   * be: the sign-in screen calls it to decide whether to draw a federated
+   * sign-in button, and nobody is signed in when it does. What it discloses is
+   * the name of a configured identity provider — the same thing the button it
+   * feeds would say out loud, and the same thing the provider's own redirect
+   * URL says. It reveals nothing about who has an account.
+   *
+   * Reading it at runtime rather than baking it into the frontend bundle is
+   * what lets an operator turn federation on without rebuilding and
+   * redeploying the frontend.
+   */
+  async authProviders() {
+    return { providers: federationProviders.map(({ name, label }) => ({ name, label })) };
+  },
+
+  /**
    * Identity and reach of the signed-in user.
    *
-   * `userId` is the Cognito-assigned `sub`, the key every permission record
-   * points at. The email address is a display value only.
+   * `userId` is the identifier every permission record points at: the pool's
+   * `sub`, whichever door the account came through (only the local stub IdP's
+   * ids keep an issuer prefix). The email address is a display value only.
    */
   async me() {
     const access = await requireAccess(context);
     return {
       userId: access.user.userSub,
       email: access.user.email,
+      identityProvider: access.user.identityProvider ?? null,
       isGlobalAdmin: access.isGlobalAdmin,
       // `null` rather than an omitted field: a global administrator reaches
       // every space, so there is no meaningful count, but the shape of the
@@ -1137,6 +1176,158 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
       spaceId: idOf(item.sk),
       permission: item.permission as Permission,
     }));
+  },
+
+  /**
+   * Replace a role group's external IdP mappings, or clear them with `[]`.
+   *
+   * These entries are the whole mapping from the IdPs' groups to what people
+   * may do here. There is no mapping record: a federated user's sign-in lists
+   * the role groups and matches their entries against the claim, so the
+   * mapping is edited in the same screen as the role group it belongs to. Each
+   * entry names its provider, because two IdPs may both know a group called
+   * `wiki-editors` and only one of them is trusted for it; mapping both IdPs
+   * onto one role group is two entries.
+   *
+   * Changing the mapping drops every edge the old one produced. The mapping is
+   * what justified those edges, so once it is gone they stand for nothing —
+   * and leaving them would make revocation depend on the revoked person
+   * signing in again, which somebody being removed has every reason not to do.
+   * Whoever the new mapping covers gets their edge back on their next sign-in.
+   *
+   * Refused on `global: true`. Handing global administrator to whoever an IdP
+   * puts in a group would make the Wiki's most privileged role reachable by an
+   * edit in a system this one does not control, and the guards that keep an
+   * administrator population non-empty cannot see such a change coming.
+   */
+  async setRoleGroupIdpGroups(
+    roleGroupId: string,
+    entries: { provider: string; group: string }[],
+    version: number,
+  ) {
+    const access = await requireAccess(context);
+    requireGlobalAdmin(access);
+    const group = await requireItem(roleGroupPk(roleGroupId), META, 'Role group');
+    if (group.global === true) {
+      invalid('The global administrator role group cannot be mapped to an IdP group');
+    }
+
+    // The parameter types are compile-time only, and this method is reachable
+    // without the browser — a caller's malformed JSON must come back as a 400
+    // that names the problem, not as a TypeError further down.
+    if (
+      !Array.isArray(entries) ||
+      entries.some(
+        (entry) => typeof entry?.provider !== 'string' || typeof entry?.group !== 'string',
+      )
+    ) {
+      invalid('entries must be an array of { provider, group } string pairs');
+    }
+    if (typeof version !== 'number') invalid('version must be a number');
+
+    // Trimmed here, not only in the browser: this method is reachable without
+    // one. An untrimmed name is stored as typed and then compared through
+    // `sortable`, so a trailing space would save cleanly and match nothing.
+    // Blank halves are refused rather than dropped — an entry that says
+    // nothing was a mistake at the caller, not a request to store less.
+    if (entries.length > 20) invalid('A role group may carry at most 20 IdP group mappings');
+    const wanted = entries.map((entry) => ({
+      provider: entry.provider.trim().toLowerCase(),
+      group: entry.group.trim(),
+    }));
+    for (const entry of wanted) {
+      if (entry.provider === '' || entry.provider.length > 32) {
+        invalid('Each mapping names its identity provider (at most 32 characters)');
+      }
+      if (entry.group === '' || entry.group.length > 200) {
+        invalid('Each mapping names an IdP group of at most 200 characters');
+      }
+    }
+    const keyOf = (provider: string, idpGroup: string) => `${provider}\n${sortable(idpGroup)}`;
+    const keys = new Set<string>();
+    const deduped = wanted.filter((entry) => {
+      const key = keyOf(entry.provider, entry.group);
+      if (keys.has(key)) return false;
+      keys.add(key);
+      return true;
+    });
+    if ((group.version ?? 0) !== version) conflict('Role group changed since it was read');
+
+    // The edges the previous mapping wrote, swept before the mapping itself is
+    // rewritten. The order is what keeps a failure recoverable: a sweep that
+    // dies here leaves the stored mapping untouched, so retrying the call finds
+    // the same difference and sweeps again. Swept after the write, a failed
+    // sweep would leave edges the new mapping never justified, and a retry
+    // would see no difference and skip them — permissions nobody can revoke
+    // short of the holder signing in again. Saving an empty mapping always
+    // sweeps, difference or not: the sweep is idempotent, and re-saving is how
+    // an edge the eventually consistent index missed the first time is caught.
+    // `deleteByIndex` is the same
+    // sweep `deleteRoleGroup` uses; the sort-key prefix is what keeps it off
+    // the user-group attachments sharing this partition on the index.
+    const storedKeys = new Set(
+      (group.idpGroups ?? []).map((entry) => keyOf(entry.provider, entry.group)),
+    );
+    const changed =
+      storedKeys.size !== keys.size || [...keys].some((key) => !storedKeys.has(key));
+    if (deduped.length === 0 || changed) {
+      await deleteByIndex(roleGroupPk(roleGroupId), 'USER#');
+      // Announced immediately, as `deleteRoleGroup` does: if the write below
+      // fails, these revocations must not sit unannounced in warm execution
+      // environments for the backstop TTL.
+      await bumpEpoch();
+    }
+
+    await table
+      .put(
+        {
+          ...group,
+          idpGroups: deduped.length > 0 ? deduped : undefined,
+          version: version + 1,
+        },
+        { ifFieldEquals: { version } },
+      )
+      .catch(asConflict('Role group'));
+    return { roleGroupId, idpGroups: deduped, version: version + 1 };
+  },
+
+  /**
+   * The federated accounts a role group holds directly.
+   *
+   * Read-only, and it has no counterpart that writes: these edges are written
+   * by a sign-in, from the IdP's claims. The screen shows them so that removing
+   * a role group is not a blind act, and so an administrator diagnosing "why
+   * can this person see that" can see the edge that answers it.
+   */
+  async listRoleGroupMembers(roleGroupId: string) {
+    const access = await requireAccess(context);
+    requireGlobalAdmin(access);
+    const members = await Array.fromAsync(
+      table.query({
+        index: 'gsi1',
+        where: { gsi1pk: { equals: roleGroupPk(roleGroupId) }, gsi1sk: { beginsWith: 'USER#' } },
+      }),
+    );
+    // The address alongside the identifier, as `listUserGroupMembers` does:
+    // an identifier is an opaque `sub`, which names nobody a reader
+    // recognises. The profiles are a batched key lookup, never a scan. An edge
+    // missing its `gsi1sk` would put an empty key in the batch and DynamoDB
+    // rejects the whole request for it, so one malformed record must not blank
+    // the entire member list — it is dropped instead.
+    const profiles = await table.getBatch(
+      members
+        .map((item) => ({ pk: item.gsi1sk ?? '', sk: PROFILE }))
+        .filter((key) => key.pk !== ''),
+    );
+    const emails = new Map(
+      profiles
+        .filter((item): item is Item => item !== null)
+        .map((item) => [idOf(item.pk), item.email ?? '']),
+    );
+    return members.map((item) => {
+      const userId = idOf(item.gsi1sk ?? '');
+      return { userId, email: emails.get(userId) ?? '' };
+    });
   },
 
   /**

@@ -55,9 +55,17 @@ export const scope = new Scope('sl-wiki');
 // front of one. Turning this on over a pool that is already in use therefore
 // takes one more step from the operator — delete every record in the auth
 // session table, which sends each user back through a real sign-in.
+// `userAttributes` adds `custom:groups` to the pool. The identity provider
+// registration in `index.cdk.ts` copies a federated sign-in's group claim into
+// it, and the sign-in hook in `federation.ts` reads it back out of the ID
+// token — no password account ever carries a value. String and mutable (the
+// defaults; Cognito's default length cap of 2048 applies), and declared
+// unconditionally because a custom attribute, once on a pool, can never be
+// removed — making it conditional would only make deploys diverge.
 export const auth = new AuthCognito(scope, 'auth', {
   signInWith: 'email',
   selfSignUp: false,
+  userAttributes: [{ name: 'groups' }],
   mfa: 'required',
   mfaTypes: ['TOTP'],
   passwordPolicy: {

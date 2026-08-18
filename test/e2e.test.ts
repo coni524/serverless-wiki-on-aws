@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { setTimeout } from 'node:timers/promises';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 
 import { leafOnlyDeleteRefusal } from '../aws-blocks/refusals.js';
 import { isViewingLocale, withViewing, withoutViewing } from '../aws-blocks/viewing.js';
@@ -37,6 +37,28 @@ import type { api as ApiType, authApi as AuthApiType } from 'aws-blocks';
 // Install cookie jar before importing the API client — Node's fetch doesn't
 // persist cookies between requests, which breaks authenticated API calls.
 installCookieJar();
+
+/**
+ * The local identity the stub IdP signs in, and the group it claims.
+ *
+ * Written before the dev server starts, because this file is the stub's
+ * directory: with no file it invents a single user with no groups, and the
+ * claim-to-role-group tests would have nothing to map. `extra` is folded into
+ * the ID token, so `groups` arrives as a real verified claim rather than
+ * something the test reached past the IdP to insert.
+ */
+mkdirSync(join(process.cwd(), '.bb-data', 'sl-wiki-sso'), { recursive: true });
+writeFileSync(
+  join(process.cwd(), '.bb-data', 'sl-wiki-sso', 'users.json'),
+  JSON.stringify([
+    {
+      sub: 'stub-federated-user',
+      email: 'federated@example.test',
+      name: 'Federated Tester',
+      extra: { groups: ['wiki-editors'] },
+    },
+  ]),
+);
 
 let server: ChildProcess | null = null;
 let api: typeof ApiType;
@@ -2868,4 +2890,212 @@ test('search: deleting the space removes its index file', async () => {
   await api.deleteSpace(searchSpaceId);
   for (let i = 0; i < 30 && existsSync(indexPath); i += 1) await setTimeout(500);
   assert.ok(!existsSync(indexPath), 'The index file survived the space deletion');
+});
+
+// ─── Federated sign-in (the stub identity provider) ──────────────────────────
+// `pnpm run dev` declares `stubIdp` — a real, in-process OIDC provider that
+// signs in a deterministic local identity instead of authenticating a human
+// (`aws-blocks/federation.ts`). Everything after the identity is settled is the
+// code a real IdP would reach: the same callback, the same session, the same
+// claim-to-role-group synchronisation.
+//
+// These tests run last because they leave the suite signed in as somebody else.
+
+const SSO_SIGN_IN_URL = 'http://localhost:3000/aws-blocks/auth/signin/sso';
+const SSO_SIGN_OUT_URL = 'http://localhost:3000/aws-blocks/auth/signout';
+/** The IdP group the stub identity claims, from `.bb-data/sl-wiki-sso/users.json`. */
+const STUB_IDP_GROUP = 'wiki-editors';
+
+let ssoSpaceId = '';
+let ssoRoleGroupId = '';
+let ssoRoleGroupVersion = 0;
+
+/**
+ * Drive the whole redirect chain, returning where and how it settled: the Wiki
+ * with a session cookie (200), or the callback's refusal of a sign-in that
+ * would grant nothing (403). Callers assert which of the two they expected.
+ *
+ * Each hop is followed by hand rather than left to `redirect: 'follow'`. The
+ * suite's cookie jar reads `Set-Cookie` off the responses it is handed, and
+ * fetch's own redirect following hands back only the last one — so the
+ * short-lived cookie the kickoff sets, which is what the callback checks the
+ * OAuth `state` and the PKCE verifier against, would never be stored and the
+ * callback would refuse. A browser sees every hop; so does this.
+ */
+async function signInThroughIdp(): Promise<{ status: number; body: string }> {
+  let url = SSO_SIGN_IN_URL;
+  for (let hop = 0; hop < 10; hop += 1) {
+    const response = await fetch(url, { redirect: 'manual' });
+    const location = response.headers.get('location');
+    const body = await response.text();
+    if (location === null) return { status: response.status, body };
+    url = new URL(location, url).toString();
+  }
+  assert.fail('The federated sign-in did not settle within ten redirects');
+}
+
+/** Sign in through the IdP and insist it succeeded. */
+async function signInThroughIdpExpectingSession(): Promise<void> {
+  const landed = await signInThroughIdp();
+  assert.strictEqual(landed.status, 200, `The federated sign-in was refused: ${landed.body}`);
+}
+
+async function signOutOfEverything(): Promise<void> {
+  await fetch(SSO_SIGN_OUT_URL, { method: 'POST' });
+  await authApi.setAuthState({ action: 'signOut' });
+}
+
+test('federation: the sign-in screen is told which providers exist', async () => {
+  // The one method that answers before anyone is signed in — the screen calls
+  // it to decide whether to draw a federated button, and it must not need a
+  // session to do that.
+  await signOutOfEverything();
+  const { providers } = await api.authProviders();
+  assert.deepStrictEqual(providers, [{ name: 'sso', label: 'sso' }]);
+});
+
+test('federation: a mapped IdP group carries its members to a role group', async () => {
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+
+  const space = await api.createSpace({ name: `連携の検証 ${Date.now().toString(36)}` });
+  ssoSpaceId = space.spaceId;
+  const roleGroup = await api.createRoleGroup({ name: `連携ロール ${Date.now().toString(36)}` });
+  ssoRoleGroupId = roleGroup.roleGroupId;
+  await api.grantSpaceToRoleGroup(ssoSpaceId, ssoRoleGroupId, 'write');
+
+  const stored = (await api.listRoleGroups()).find((group) => group.id === ssoRoleGroupId);
+  assert.ok(stored !== undefined);
+  // Scoped to the provider the stub answers as: the same shape a two-IdP
+  // deployment stores, so the provider-matching half of the sync is exercised
+  // here and not only in unit tests.
+  const mapped = await api.setRoleGroupIdpGroups(
+    ssoRoleGroupId,
+    [{ provider: 'sso', group: STUB_IDP_GROUP }],
+    stored.version,
+  );
+  ssoRoleGroupVersion = mapped.version;
+  assert.deepStrictEqual(mapped.idpGroups, [{ provider: 'sso', group: STUB_IDP_GROUP }]);
+
+  // Now come in the other door. The claim names the group above, so the
+  // sign-in is what writes the edge that grants the space.
+  await signOutOfEverything();
+  await signInThroughIdpExpectingSession();
+
+  const me = await api.me();
+  assert.strictEqual(me.identityProvider, 'sso', 'The session was not recognised as federated');
+  // With no issuer configured, canonicalisation leaves the stub's
+  // `${iss}:${sub}` id whole — the prefix is stripped only for the pool
+  // issuer, which local development does not have.
+  assert.ok(me.userId.includes('://'), 'The stub identifier keeps its issuer prefix');
+  assert.strictEqual(me.isGlobalAdmin, false, 'The IdP must not confer global administrator');
+
+  const reachable = await api.mySpaces();
+  assert.ok(
+    reachable.some((entry) => entry.spaceId === ssoSpaceId),
+    'The mapped role group did not carry the space to the federated user',
+  );
+});
+
+test('federation: the directory records which door the account came through', async () => {
+  await signOutOfEverything();
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+
+  const federated = (await api.findUsers()).users.filter(
+    (user) => user.identityProvider !== null,
+  );
+  assert.ok(federated.length > 0, 'No account is marked as federated');
+  assert.ok(federated.every((user) => user.identityProvider === 'sso'));
+
+  // The edge is readable from the role group's side, which is what the
+  // management screen shows — it has no counterpart that writes.
+  const members = await api.listRoleGroupMembers(ssoRoleGroupId);
+  assert.strictEqual(members.length, 1, 'The role group did not hold the federated user');
+});
+
+test('federation: unmapping the group drops the edge without waiting for a sign-in', async () => {
+  // What this cannot exercise: the local table's index answers with what was
+  // just written, while the real gsi1 is eventually consistent — an edge the
+  // sweep's index read misses arrives only against real DynamoDB. That case is
+  // why `setRoleGroupIdpGroups` sweeps again on every empty save.
+  await api.setRoleGroupIdpGroups(ssoRoleGroupId, [], ssoRoleGroupVersion);
+
+  // Immediately, not at the revoked user's next sign-in. The mapping is what
+  // justified the edge, and somebody being removed has every reason never to
+  // sign in again.
+  assert.strictEqual(
+    (await api.listRoleGroupMembers(ssoRoleGroupId)).length,
+    0,
+    'The edge outlived the mapping that justified it',
+  );
+
+  await signOutOfEverything();
+  // With the mapping gone the claims reach nothing, and the stub identity
+  // holds no user-group membership either — so the sign-in itself is refused
+  // now, instead of admitting a visitor to an empty screen.
+  const refused = await signInThroughIdp();
+  assert.strictEqual(refused.status, 403, 'A sign-in that grants nothing was let in');
+  assert.ok(refused.body.includes('no access'), `The refusal did not say why: ${refused.body}`);
+  await assert.rejects(
+    () => api.me(),
+    'The refused sign-in still issued a session cookie',
+  );
+
+  await signOutOfEverything();
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+  assert.strictEqual(
+    (await api.listRoleGroupMembers(ssoRoleGroupId)).length,
+    0,
+    'A sign-in whose claims name nothing wrote the edge back',
+  );
+});
+
+test('federation: the global administrator role group cannot be mapped to an IdP group', async () => {
+  // Otherwise a change made in a system this Wiki does not control would be
+  // enough to become administrator of every space in it.
+  await signOutOfEverything();
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+  const admin = (await api.listRoleGroups()).find((group) => group.global);
+  assert.ok(admin !== undefined, 'No global administrator role group to test against');
+  await rejects(
+    () =>
+      api.setRoleGroupIdpGroups(admin.id, [{ provider: 'sso', group: 'anything' }], admin.version),
+    'global administrator',
+  );
+});
+
+test('federation: signing out ends the federated session on the server', async () => {
+  // Every other test follows `signOutOfEverything` with a fresh sign-in, so a
+  // sign-out route that stopped working — a moved path, a block update that
+  // starts demanding a CSRF token — would leave them all green. This is the one
+  // place that checks the session is actually gone.
+  //
+  // The mapping was removed above, and a federated identity that reaches no
+  // permission can no longer sign in at all — so it is restored first: this
+  // test needs a session to end.
+  const stored = (await api.listRoleGroups()).find((group) => group.id === ssoRoleGroupId);
+  assert.ok(stored !== undefined);
+  await api.setRoleGroupIdpGroups(
+    ssoRoleGroupId,
+    [{ provider: 'sso', group: STUB_IDP_GROUP }],
+    stored.version,
+  );
+
+  await signOutOfEverything();
+  await signInThroughIdpExpectingSession();
+  assert.strictEqual((await api.me()).identityProvider, 'sso');
+
+  await signOutOfEverything();
+  await assert.rejects(
+    () => api.me(),
+    (err: any) => err.message.includes('Authentication')
+      || err.message.includes('Session')
+      || err.message.includes('401')
+      || err.message.includes('authenticated'),
+  );
+
+  // The space and role group the federation tests created, removed while the
+  // suite holds an account that may.
+  await signInAs(ADMIN, ADMIN_PASSWORD);
+  await api.deleteRoleGroup(ssoRoleGroupId);
+  await api.deleteSpace(ssoSpaceId);
 });
