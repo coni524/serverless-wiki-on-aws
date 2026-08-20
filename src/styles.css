@@ -107,6 +107,67 @@
   pointer-events: auto;
 }
 
+/* Moving a node by drag (src/features/pages/hooks/use-page-move.ts).
+
+   The state classes sit on the row's content span, but what should light up is
+   the whole row, so each rule reaches the row through `:has` — and as with the
+   actions above, `li > div` is the row alone: the child rows live in a sibling
+   `ul`, so a folder lighting up does not light its subtree.
+
+   Every signal is paint on a row that already exists. Nothing is inserted or
+   grown during a drag, so the tree stands perfectly still while the pointer
+   travels — the colours are the entire interface. The colour values arrive as
+   custom properties set from Cloudscape's design tokens where the classes are
+   applied, so they follow the theme. */
+.wiki-tree-row {
+  display: block;
+  min-width: 0;
+}
+.wiki-page-tree li[role='treeitem'] > div:has(.wiki-drag-src) {
+  opacity: 0.45;
+}
+.wiki-page-tree li[role='treeitem'] > div:has(.wiki-drop-ok) {
+  background: var(--wiki-drop-ok-bg);
+  box-shadow: inset 0 0 0 1.5px var(--wiki-drop-border);
+  border-radius: 8px;
+}
+.wiki-page-tree li[role='treeitem'] > div:has(.wiki-drop-ng) {
+  background: var(--wiki-drop-ng-bg);
+  border-radius: 8px;
+}
+
+/* Where the moved row landed: a flash at its new place, because the place is
+   decided by the name order, not by where the drop happened. */
+.wiki-page-tree li[role='treeitem'] > div:has(.wiki-moved-flash) {
+  border-radius: 8px;
+  animation: wiki-moved-flash 1.4s ease-out;
+}
+@keyframes wiki-moved-flash {
+  0%,
+  50% {
+    background-color: var(--wiki-flash-bg);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wiki-page-tree li[role='treeitem'] > div:has(.wiki-moved-flash) {
+    animation: none;
+    background-color: var(--wiki-flash-bg);
+  }
+}
+
+/* The header as the space root's drop target (src/app/SpaceNavigation.tsx).
+   The root has no row in the tree, so the row that names the space stands in. */
+.wiki-nav-header.wiki-drop-ok {
+  background: var(--wiki-drop-ok-bg);
+  box-shadow: inset 0 0 0 1.5px var(--wiki-drop-border);
+}
+.wiki-nav-header.wiki-drop-ng {
+  background: var(--wiki-drop-ng-bg);
+}
+
 /* The navigation panel's drag handle (src/components/NavigationResizer.tsx).
 
    Fixed to the panel's right edge, from below the top bar to the foot of the

@@ -88,11 +88,17 @@ export async function loadMoreTreeLevel(
 ): Promise<void> {
   const result = await api.listChildPages(spaceId, parentPageId, cursor);
   noteFreshness(result.items);
-  queryClient.setQueryData<Level>(treeLevelKey(spaceId, parentPageId), (prev) =>
-    prev === undefined
-      ? { items: result.items, cursor: result.nextCursor }
-      : { items: [...prev.items, ...result.items], cursor: result.nextCursor },
-  );
+  queryClient.setQueryData<Level>(treeLevelKey(spaceId, parentPageId), (prev) => {
+    if (prev === undefined) return { items: result.items, cursor: result.nextCursor };
+    // A node moved into this level was inserted into the slices already held
+    // (`noteMovedNode`), and the server places it last among its siblings — so
+    // a later slice of a long level can carry the same row again. Held wins.
+    const held = new Set(prev.items.map((item) => item.pageId));
+    return {
+      items: [...prev.items, ...result.items.filter((item) => !held.has(item.pageId))],
+      cursor: result.nextCursor,
+    };
+  });
 }
 
 const freshness = new Map<string, string>();
@@ -352,6 +358,39 @@ export function noteDeletedNode(input: {
     freshness.delete(id);
   }
 
+  revalidate(spaceId);
+}
+
+/**
+ * A node was moved to a new parent, and `page` is the row as it now stands —
+ * the record the source level was holding, carrying the position the move
+ * answered with.
+ *
+ * The row leaves the level it was in and joins the one it landed in, so the
+ * tree moves in the frame the drop lands. The destination level may not be
+ * held at all — a folder nobody has unfolded — and then there is nothing to
+ * edit: the level is fetched complete, moved row included, when it first
+ * appears on screen.
+ *
+ * The revalidate behind the edits is for everything a reparent changes beyond
+ * the two levels: the `hasChildren` flags of both parents, and the breadcrumbs
+ * of every page in the moved subtree.
+ */
+export function noteMovedNode(input: {
+  spaceId: string;
+  page: Page;
+  fromParentId: string | null;
+  toParentId: string | null;
+}): void {
+  const { spaceId, page } = input;
+  editLevel(spaceId, input.fromParentId, (level) => ({
+    ...level,
+    items: level.items.filter((item) => item.pageId !== page.pageId),
+  }));
+  editLevel(spaceId, input.toParentId, (level) => ({
+    ...level,
+    items: [...level.items.filter((item) => item.pageId !== page.pageId), page],
+  }));
   revalidate(spaceId);
 }
 

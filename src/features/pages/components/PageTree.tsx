@@ -1,5 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties, DragEvent } from 'react';
 import { api } from 'aws-blocks';
+import {
+  colorBackgroundItemSelected,
+  colorBackgroundStatusError,
+  colorBackgroundStatusSuccess,
+  colorBorderItemFocused,
+} from '@cloudscape-design/design-tokens';
 import { useQueries } from '@tanstack/react-query';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -26,6 +33,7 @@ import {
   treeLevelQuery,
   type Level,
 } from '@/features/pages/api/page-cache';
+import type { PageMove } from '@/features/pages/hooks/use-page-move';
 import { useT } from '@/lib/i18n';
 import { hrefNode, hrefSpace, navigate } from '@/lib/router';
 
@@ -36,6 +44,9 @@ import { hrefNode, hrefSpace, navigate } from '@/lib/router';
 // The tree render therefore has to be depth-bounded; this is that bound, set
 // above any legitimate depth so real content is intact.
 const MAX_TREE_DEPTH = 20;
+
+/** How long a drag rests on a collapsed folder before the folder unfolds itself. */
+const SPRING_MS = 600;
 
 /** The key the level map uses for the space root, which has no parent page id. */
 const ROOT = ROOT_LEVEL;
@@ -98,7 +109,15 @@ export type NewNodeTarget = { parentPageId: string | null; kind: NodeKind };
  * the row that takes the title of a page about to be created.
  */
 type TreeNode =
-  | { kind: 'page'; id: string; page: Page; parentPageId: string | null; children?: TreeNode[] }
+  | {
+      kind: 'page';
+      id: string;
+      page: Page;
+      parentPageId: string | null;
+      /** Ancestor ids, root first — what says a drop target sits inside the dragged subtree. */
+      chain: string[];
+      children?: TreeNode[];
+    }
   | { kind: 'pending'; id: string; message: string | null }
   | { kind: 'more'; id: string; parentPageId: string | null; cursor: string }
   | { kind: 'new'; id: string; parentPageId: string | null; nodeKind: NodeKind };
@@ -144,6 +163,7 @@ export function PageTree({
   currentPageId,
   expandPath,
   editable,
+  move,
   newNode,
   onNewNode,
   onNewNodeEnd,
@@ -154,6 +174,8 @@ export function PageTree({
   expandPath: string[];
   /** Whether the caller holds `write` on the space. Read-only hides the controls. */
   editable: boolean;
+  /** The drag-and-drop move, held by the shell because its root target is up there. */
+  move: PageMove;
   /** Where the open title input sits, or `null` when nothing is being created. */
   newNode: NewNodeTarget | null;
   onNewNode: (target: NewNodeTarget) => void;
@@ -202,6 +224,16 @@ export function PageTree({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Deletion | null>(null);
+
+  // The row the drag is over right now — one row at a time, like the other
+  // single-slot interactions above. Whether it lights as a target or as a
+  // refusal is decided at render time (`move.canDrop`), not stored.
+  const [overId, setOverId] = useState<string | null>(null);
+  // A collapsed folder the drag is resting on unfolds by itself after a
+  // moment, so a node can be carried into a branch nobody has opened yet.
+  const springTimer = useRef<number | undefined>(undefined);
+  const clearSpring = () => window.clearTimeout(springTimer.current);
+  useEffect(() => clearSpring, []);
 
   // One query per level on screen, shared with the folder screen — both ask the
   // same parent for the same listing (`treeLevelQuery`). Refetch dedup and the
@@ -421,6 +453,7 @@ export function PageTree({
         id: page.pageId,
         page,
         parentPageId,
+        chain: ancestors,
         // The title input for a new child is a child row of the folder it is
         // being created under, so it appears exactly where the node will.
         children:
@@ -582,6 +615,92 @@ export function PageTree({
           }
 
           const href = hrefNode(spaceId, node.page.pageId, nodeKind);
+
+          // The move, as this row sees it. Only a folder can receive the drop,
+          // and only one the dragged node may actually land in — a row that
+          // cannot take the drop shows the refusal instead of a dead target.
+          const isDragSource = move.drag?.page.pageId === node.page.pageId;
+          const validTarget = move.canDrop({
+            pageId: node.page.pageId,
+            kind: nodeKind,
+            chain: node.chain,
+          });
+          const rowClass = [
+            'wiki-tree-row',
+            isDragSource ? 'wiki-drag-src' : '',
+            move.drag !== null && !isDragSource && overId === node.page.pageId
+              ? validTarget
+                ? 'wiki-drop-ok'
+                : 'wiki-drop-ng'
+              : '',
+            move.movedId === node.page.pageId ? 'wiki-moved-flash' : '',
+          ]
+            .filter(Boolean)
+            .join(' ');
+          const dragProps = editable
+            ? {
+                draggable: true,
+                onDragStart: (e: DragEvent) => {
+                  e.dataTransfer.effectAllowed = 'move';
+                  // Some browsers refuse to start a drag that carries no data.
+                  e.dataTransfer.setData('text/plain', node.page.pageId);
+                  move.start({ page: node.page, parentPageId: node.parentPageId });
+                },
+                onDragEnd: () => {
+                  clearSpring();
+                  setOverId(null);
+                  move.end();
+                },
+                onDragOver: (e: DragEvent) => {
+                  if (move.drag === null || isDragSource) return;
+                  if (validTarget) {
+                    // preventDefault is what makes the row a drop target at
+                    // all; withholding it on an invalid row is what shows the
+                    // no-drop cursor.
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                  }
+                  setOverId(node.page.pageId);
+                },
+                onDragEnter: (e: DragEvent) => {
+                  if (!validTarget) return;
+                  if (node.children === undefined || expanded.includes(node.page.pageId)) return;
+                  // Entering from one of the row's own children is not an
+                  // arrival — dragenter bubbles, and resetting the timer for
+                  // every inner crossing would keep a restless pointer from
+                  // ever unfolding the row.
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  clearSpring();
+                  const folderId = node.page.pageId;
+                  springTimer.current = window.setTimeout(() => {
+                    setExpanded((prev) => (prev.includes(folderId) ? prev : [...prev, folderId]));
+                  }, SPRING_MS);
+                },
+                onDragLeave: (e: DragEvent) => {
+                  // Moving between the row's own children fires leave/enter
+                  // pairs; only leaving the row itself puts the light out.
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  clearSpring();
+                  setOverId((prev) => (prev === node.page.pageId ? null : prev));
+                },
+                onDrop: (e: DragEvent) => {
+                  e.preventDefault();
+                  clearSpring();
+                  setOverId(null);
+                  if (!validTarget) return;
+                  const folderId = node.page.pageId;
+                  void move.moveTo(folderId).then((moved) => {
+                    // Unfold the folder that just took the node, so the drop
+                    // is seen landing rather than vanishing behind a toggle.
+                    if (moved) {
+                      setExpanded((prev) =>
+                        prev.includes(folderId) ? prev : [...prev, folderId],
+                      );
+                    }
+                  });
+                },
+              }
+            : {};
           return {
             icon,
             // One line, cut with an ellipsis, whatever the panel's width. A
@@ -592,23 +711,25 @@ export function PageTree({
             // cut is out of reach — it is given `tooltipText` because the slot
             // holds a link.
             content: (
-              <TruncatedText tooltipText={title}>
-                <Box
-                  variant="span"
-                  fontWeight={node.page.pageId === currentPageId ? 'bold' : 'normal'}
-                >
-                  <Link
-                    href={href}
-                    variant="secondary"
-                    onFollow={(e) => {
-                      e.preventDefault();
-                      navigate(href);
-                    }}
+              <span className={rowClass} {...dragProps}>
+                <TruncatedText tooltipText={title}>
+                  <Box
+                    variant="span"
+                    fontWeight={node.page.pageId === currentPageId ? 'bold' : 'normal'}
                   >
-                    {title}
-                  </Link>
-                </Box>
-              </TruncatedText>
+                    <Link
+                      href={href}
+                      variant="secondary"
+                      onFollow={(e) => {
+                        e.preventDefault();
+                        navigate(href);
+                      }}
+                    >
+                      {title}
+                    </Link>
+                  </Box>
+                </TruncatedText>
+              </span>
             ),
             // Held in the DOM at all times and revealed by the row's hover or
             // focus (see `.wiki-tree-actions` in styles.css): laying them out
@@ -671,7 +792,24 @@ export function PageTree({
     );
 
   return (
-    <div className="wiki-page-tree">
+    <div
+      className="wiki-page-tree"
+      // The move's colours, taken from the live theme the way the shell's
+      // header border is: the tokens resolve in light and dark alike.
+      style={
+        {
+          '--wiki-drop-ok-bg': colorBackgroundItemSelected,
+          '--wiki-drop-ng-bg': colorBackgroundStatusError,
+          '--wiki-drop-border': colorBorderItemFocused,
+          '--wiki-flash-bg': colorBackgroundStatusSuccess,
+        } as CSSProperties
+      }
+    >
+      {move.error !== null && (
+        <Box padding={{ bottom: 'xs' }}>
+          <StatusIndicator type="error">{move.error}</StatusIndicator>
+        </Box>
+      )}
       {tree}
 
       {deleting !== null && (

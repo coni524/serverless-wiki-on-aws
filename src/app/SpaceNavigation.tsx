@@ -2,8 +2,14 @@ import type { CSSProperties } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import Drawer from '@cloudscape-design/components/drawer';
-import { colorBorderDividerDefault } from '@cloudscape-design/design-tokens';
+import {
+  colorBackgroundItemSelected,
+  colorBackgroundStatusError,
+  colorBorderDividerDefault,
+  colorBorderItemFocused,
+} from '@cloudscape-design/design-tokens';
 import { useT } from '@/lib/i18n';
+import { usePageMove } from '@/features/pages/hooks/use-page-move';
 import { canWrite } from '@/features/spaces/utils/permissions';
 import { mySpacesQuery } from '@/features/spaces/api/space-cache';
 import type { NodeKind, Space } from '@/types/api';
@@ -79,11 +85,33 @@ export function SpaceNavigation({
 
   const editable = current !== null && canWrite(current.permission);
 
+  // The tree's drag-and-drop move lives up here rather than in the tree,
+  // because one of its two drop targets is this panel's own header: the
+  // space-name row is what a node is dropped on to land at the space root,
+  // which has no row inside the tree. Nothing appears or disappears while a
+  // drag runs — the row only changes colour — so the tree never shifts under
+  // the pointer.
+  const move = usePageMove(spaceId);
+
   return (
     <Drawer disableContentPaddings>
       <div
-        className="wiki-nav-header"
-        style={{ '--wiki-nav-header-border': colorBorderDividerDefault } as CSSProperties}
+        className={[
+          'wiki-nav-header',
+          move.rootOver === 'ok' ? 'wiki-drop-ok' : '',
+          move.rootOver === 'ng' ? 'wiki-drop-ng' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style={
+          {
+            '--wiki-nav-header-border': colorBorderDividerDefault,
+            '--wiki-drop-ok-bg': colorBackgroundItemSelected,
+            '--wiki-drop-ng-bg': colorBackgroundStatusError,
+            '--wiki-drop-border': colorBorderItemFocused,
+          } as CSSProperties
+        }
+        {...(editable ? move.rootProps : {})}
       >
         <SpaceSwitcher spaces={spaces} current={current} />
         {editable && (
@@ -111,6 +139,7 @@ export function SpaceNavigation({
         currentPageId={currentPageId}
         expandPath={expandPath}
         editable={editable}
+        move={move}
         newNode={newNode}
         onNewNode={onNewNode}
         onNewNodeEnd={onNewNodeEnd}
