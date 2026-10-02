@@ -10,7 +10,7 @@
 
 A Markdown wiki that runs on AWS. The browser UI, the Amazon Bedrock assistant, MCP clients, and the Obsidian sync plugin read and write the same pages through the same space permission check, resolved in the API layer on every request.
 
-The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQS, and Bedrock.
+The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQS, and Bedrock, including a Bedrock AgentCore Runtime that runs the AI assistant.
 
 ![A page in the wiki: the folder-and-page tree of the space on the left, the rendered Markdown on the right](assets/screenshot-page.png)
 
@@ -40,7 +40,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQ
 
 ## Architecture
 
-![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and talks to Bedrock for search and AI replies](assets/architecture.png)
+![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and calls Bedrock for search; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
 
 *Solid arrows are the request path; dashed arrows are asynchronous or background flows.*
 
@@ -70,7 +70,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQ
 
 - [Node.js 24](https://nodejs.org/) and [pnpm 11](https://pnpm.io/) (npm is not supported; `mise install` picks up both from `mise.toml`)
 - To deploy: an AWS account, [AWS CLI 2.32.0+](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), and Bedrock model access for Amazon Nova 2 Lite and Titan Text Embeddings V2
-- The CloudFormation stack deploys to the region your AWS CLI profile specifies. It has been tested in `ap-northeast-1` (Tokyo); the region you pick must offer S3 Vectors and the two Bedrock models above
+- The CloudFormation stack deploys to the region your AWS CLI profile specifies. It has been tested in `ap-northeast-1` (Tokyo); the region you pick must offer S3 Vectors, Bedrock AgentCore Runtime, and the two Bedrock models above
 
 ## Quick Start
 

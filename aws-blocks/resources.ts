@@ -114,6 +114,9 @@ const corsOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '')
 
 export const content = new FileBucket(scope, 'content', {
   removalPolicy: process.env.BLOCKS_SANDBOX === 'true' ? 'destroy' : 'retain',
+  // The block turns versioning on unless told otherwise; see above for why it
+  // stays off here.
+  versioned: false,
   // Browsers upload and download attachments straight to S3, so the bucket
   // needs the origins named explicitly — never a wildcard. Unset means no
   // cross-origin access, which is correct for a same-origin deployment and for

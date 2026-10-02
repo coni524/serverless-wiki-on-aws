@@ -35,6 +35,7 @@ import type { OIDCUser } from '@aws-blocks/blocks';
 import { ApiError } from '@aws-blocks/core';
 
 import { runtimeSsoProviders, ssoSettingIds } from './sso-config.js';
+import { DEPLOYED } from './deployed.js';
 import { scope, table } from './resources.js';
 import { bumpEpoch } from './epoch.js';
 import {
@@ -99,9 +100,6 @@ const SCOPES = (process.env.SSO_SCOPES ?? '')
   .map((scope) => scope.trim())
   .filter((scope) => scope !== '');
 
-/** True inside Lambda, where the runtime always sets this. Never true locally. */
-const IN_LAMBDA = process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined;
-
 /**
  * Whether to stand up the in-process stub IdP instead of talking to a real one.
  *
@@ -109,10 +107,11 @@ const IN_LAMBDA = process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined;
  * for whoever can reach it. Two independent conditions therefore have to hold,
  * and both of them fail closed: the dev server sets `SSO_STUB` and nothing else
  * does (`deploy.ts` and `sandbox.ts` clear it before synth), and the check
- * additionally refuses to run inside Lambda. Neither alone is trusted, because
- * an environment variable is ambient and a runtime check cannot reach synth.
+ * additionally refuses to run in any deployed compute. Neither alone is
+ * trusted, because an environment variable is ambient and a runtime check
+ * cannot reach synth.
  */
-const USE_STUB = process.env.SSO_STUB === 'true' && !IN_LAMBDA;
+const USE_STUB = process.env.SSO_STUB === 'true' && !DEPLOYED;
 
 /**
  * The credentials of the pool's federation app client.

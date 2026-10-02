@@ -422,8 +422,8 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   /**
    * Send a message and let the agent answer on the conversation's channel.
    *
-   * Returns as soon as the work is queued — the agent runs in the block's async
-   * job and publishes to Realtime, so nothing here waits on a model.
+   * Returns as soon as the work is handed off — the agent runs on the block's
+   * AgentCore Runtime and publishes to Realtime, so nothing here waits on a model.
    * The client must already be subscribed; `useChat` handles that ordering.
    *
    * `context: { userId }` is what the tools act as. It comes from the resolved

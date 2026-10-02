@@ -361,8 +361,8 @@ async function resolveAccess(context: BlocksContext): Promise<Access> {
 /**
  * The same three-hop resolution, for a caller identified by their `sub` alone.
  *
- * The AI assistant's tools run inside the Agent block's async job, which has no
- * request context to authenticate: the user is named by the tool context the API
+ * The AI assistant's tools run on the Agent block's AgentCore Runtime, which has
+ * no request context to authenticate: the user is named by the tool context the API
  * layer filled in from the authenticated session. Everything after
  * hop 1 is identical, so a tool is gated by exactly the checks the UI-facing API
  * is gated by.

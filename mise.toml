@@ -5,6 +5,10 @@
 # them must be the same major. Bumping this without bumping the Lambda runtime
 # would let code compile locally against APIs the runtime does not have.
 #
+# The AI assistant's agent loop is the exception: the Agent block runs it on an
+# AgentCore Runtime with Node 22, and that runtime imports the same backend
+# module. Backend code under aws-blocks/ therefore sticks to APIs Node 22 has.
+#
 # pnpm is pinned to the major that `packageManager` in package.json declares.
 [tools]
 node = "24"

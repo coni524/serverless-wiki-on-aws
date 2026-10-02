@@ -98,9 +98,10 @@ try {
   // The first pass created what the settings above needed, so it configured
   // the Lambda without them. Rather than leave the second pass to whoever
   // typed the command — a step that is remembered until it isn't — this asks
-  // the stack that now exists and deploys again. Only the Lambda's
-  // environment changes, so the pass is short. The conditions can only hold
-  // once each: from here on the stack answers on the first ask.
+  // the stack that now exists and deploys again. Only the environment of the
+  // Lambda and the assistant's runtime changes, so the pass is short. The
+  // conditions can only hold once each: from here on the stack answers on the
+  // first ask.
   const needsSecondPass = (wantsResolvedOrigin && originBefore === null) || !ssoBefore;
   if (needsSecondPass) {
     const outputs = await readStackOutputs(stackName);

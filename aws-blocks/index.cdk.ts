@@ -1,7 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
 import { RemovalPolicies, Mixins } from 'aws-cdk-lib';
 
-import { Hosting, BlocksStack, SandboxDisableDeletionProtection } from '@aws-blocks/blocks/cdk';
+import {
+  Hosting,
+  BlocksStack,
+  BlocksPresets,
+  SandboxDisableDeletionProtection,
+} from '@aws-blocks/blocks/cdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -65,10 +70,45 @@ if (ssoEntries.length > 0) {
   process.env.SSO_PROVIDERS = ssoProvidersJson(ssoEntries);
 }
 
+// Stack-wide defaults every block reads unless it sets its own option. The
+// production preset retains stateful resources and turns on deletion protection
+// and DynamoDB point-in-time recovery; the sandbox preset tears down cleanly and
+// lets a localhost frontend reach the deployed API.
 export const blocksStack = await BlocksStack.create(app, stackName, {
   backendHandlerPath: join(__dirname, 'index.handler.ts'),
-  backendCDKPath: join(__dirname, 'index.ts')
+  backendCDKPath: join(__dirname, 'index.ts'),
+  defaults: sandboxMode ? BlocksPresets.sandbox : BlocksPresets.production,
 });
+
+// The backend module is imported by two computes: the Lambda handler, and the
+// AgentCore Runtime the Agent block runs the assistant's loop and tools on. The
+// runtime does not inherit the handler's environment — the block gives it only
+// the few variables it needs to find the stack — so a value the backend reads
+// from `process.env` is set on both, and the two imports see the same thing.
+//
+// The block exposes no handle to the runtime and no way to add to its
+// environment, so the resource is found by walking the tree, like the knowledge
+// base below, and the variables are written as property overrides. Matched by
+// CloudFormation type and exhaustively: if a future version of the block stops
+// creating exactly one runtime, the synth fails here instead of deploying a
+// runtime whose tools silently run without their settings.
+const agentRuntimes = blocksStack.node
+  .findAll()
+  .filter(
+    (node): node is cdk.CfnResource =>
+      node instanceof cdk.CfnResource && node.cfnResourceType === 'AWS::BedrockAgentCore::Runtime',
+  );
+if (agentRuntimes.length !== 1) {
+  throw new Error(
+    `Expected exactly one AgentCore Runtime for the assistant, found ${agentRuntimes.length}.`,
+  );
+}
+const agentRuntime = agentRuntimes[0]!;
+
+function setBackendEnv(name: string, value: string): void {
+  blocksStack.handler.addEnvironment(name, value);
+  agentRuntime.addPropertyOverride(`EnvironmentVariables.${name}`, value);
+}
 
 if (sandboxMode) {
   // Make all resources deletable so sandbox:destroy can clean up the entire stack.
@@ -80,7 +120,7 @@ if (sandboxMode) {
 
   // Tell the runtime that cookies need cross-domain attributes (frontend on
   // localhost, API on API Gateway — different registrable domains).
-  blocksStack.handler.addEnvironment('BLOCKS_SANDBOX', 'true');
+  setBackendEnv('BLOCKS_SANDBOX', 'true');
 }
 
 // ─── Search corpus bucket + re-ingestion grant ───────────────────────────────
@@ -99,7 +139,7 @@ const corpusBucket = new cdk.aws_s3.Bucket(blocksStack, 'SearchCorpus', {
   autoDeleteObjects: sandboxMode,
 });
 corpusBucket.grantReadWrite(blocksStack.handler);
-blocksStack.handler.addEnvironment('SEARCH_CORPUS_BUCKET', corpusBucketName);
+setBackendEnv('SEARCH_CORPUS_BUCKET', corpusBucketName);
 
 // ─── Keyword index bucket name ───────────────────────────────────────────────
 // The keyword-search index lives in the content FileBucket, one object per
@@ -120,18 +160,19 @@ if (contentBuckets.length !== 1) {
     `Expected exactly one content bucket for the keyword index, found ${contentBuckets.length}.`,
   );
 }
-blocksStack.handler.addEnvironment('KEYWORD_INDEX_BUCKET', contentBuckets[0]!.bucketName);
+setBackendEnv('KEYWORD_INDEX_BUCKET', contentBuckets[0]!.bucketName);
 
 // ─── Conversation model ──────────────────────────────────────────────────────
 // The Agent block resolves its model where it runs, not where it is synthesized:
-// the CDK side provisions the tables, bucket, queue and WebSocket and never looks
-// at `model`, while the runtime constructor picks it up from the config built
-// during the handler's own import. So `AI_MODEL_ID` has to reach the Lambda's
-// environment — reading it at synth alone would leave every deploy on the
-// default, silently, no matter what the operator passed.
+// the CDK side provisions the tables, bucket, AgentCore Runtime and WebSocket and
+// never looks at `model`, while the runtime constructor picks it up from the
+// config built during the backend's own import. So `AI_MODEL_ID` has to reach
+// the environment of both computes that import it (see `setBackendEnv`) —
+// reading it at synth alone would leave every deploy on the default, silently,
+// no matter what the operator passed.
 const modelId = process.env.AI_MODEL_ID;
 if (modelId !== undefined && modelId !== '') {
-  blocksStack.handler.addEnvironment('AI_MODEL_ID', modelId);
+  setBackendEnv('AI_MODEL_ID', modelId);
 }
 
 // `StartIngestionJob` is the one Bedrock call the block does not wrap and does not
@@ -170,7 +211,7 @@ blocksStack.handler.addToRolePolicy(
 for (const name of ['SSO_ISSUER_URL', 'SSO_PROVIDERS', 'SSO_GROUPS_CLAIM', 'SSO_SCOPES']) {
   const value = process.env[name];
   if (value !== undefined && value.trim() !== '') {
-    blocksStack.handler.addEnvironment(name, value.trim());
+    setBackendEnv(name, value.trim());
   }
 }
 
@@ -469,9 +510,9 @@ const mcpClient = userPool.addClient('McpClient', {
 });
 for (const { idp } of ssoRegistrations) mcpClient.node.addDependency(idp);
 
-blocksStack.handler.addEnvironment('MCP_USER_POOL_ID', userPool.userPoolId);
-blocksStack.handler.addEnvironment('MCP_CLIENT_ID', mcpClient.userPoolClientId);
-blocksStack.handler.addEnvironment('MCP_AUTH_DOMAIN', mcpDomain.baseUrl());
+setBackendEnv('MCP_USER_POOL_ID', userPool.userPoolId);
+setBackendEnv('MCP_CLIENT_ID', mcpClient.userPoolClientId);
+setBackendEnv('MCP_AUTH_DOMAIN', mcpDomain.baseUrl());
 
 // The address clients actually reach, when the request cannot say what it is.
 // Required whenever anything fronts the API — CloudFront does, and it replaces
@@ -481,7 +522,7 @@ blocksStack.handler.addEnvironment('MCP_AUTH_DOMAIN', mcpDomain.baseUrl());
 // on the distribution which depends on the API which depends on the Lambda.
 const publicOrigin = process.env.MCP_PUBLIC_ORIGIN;
 if (publicOrigin !== undefined && publicOrigin !== '') {
-  blocksStack.handler.addEnvironment('MCP_PUBLIC_ORIGIN', publicOrigin);
+  setBackendEnv('MCP_PUBLIC_ORIGIN', publicOrigin);
 } else if (!sandboxMode) {
   // Not fatal: the rest of the Wiki works, and on the first deploy this is
   // expected — the distribution does not exist yet, and `scripts/deploy.ts`
@@ -543,6 +584,12 @@ if (!sandboxMode) {
     root: join(__dirname, '..'),
     buildCommand: 'pnpm run build',
     buildOutputDir: 'dist',
-    api: blocksStack
+    api: blocksStack,
+    // The block's CloudFront 5xx alarm is created in the stack's region, but
+    // CloudFront publishes its metrics only in us-east-1, so anywhere else the
+    // alarm never receives a datapoint and reports OK forever — while the KMS
+    // key that encrypts its topic bills every month. Off until a release of the
+    // block places the alarm in us-east-1 (fixed upstream after hosting 0.3.1).
+    monitoring: { enabled: false },
   });
 }

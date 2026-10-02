@@ -27,6 +27,7 @@ import { ApiError, type BlocksContext } from '@aws-blocks/core';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 
 import { type Access, accessForUser, requireAccess } from './access.js';
+import { DEPLOYED } from './deployed.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 // Written into the Lambda's environment by `index.cdk.ts`, which is also what
@@ -87,9 +88,6 @@ const verifier = OAUTH_CONFIGURED
       clientId: CLIENT_ID,
     })
   : null;
-
-/** True inside Lambda, where the runtime always sets this. Never true locally. */
-const IN_LAMBDA = process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined;
 
 // ─── HTTP-level refusals ─────────────────────────────────────────────────────
 
@@ -185,16 +183,16 @@ export type Caller = { access: Access; scopes: Set<string> };
  * development authenticates the same way the UI does — the session cookie, via
  * `requireAccess`. This is a real sign-in, not a bypass, and it is unreachable
  * on AWS twice over: `index.cdk.ts` always sets the three variables, and the
- * branch additionally refuses to run inside Lambda. It exists so the e2e suite
- * can drive both surfaces, including the permission refusals, against the local
- * mock.
+ * branch additionally refuses to run in any deployed compute. It exists so the
+ * e2e suite can drive both surfaces, including the permission refusals, against
+ * the local mock.
  */
 export async function authenticate(
   context: BlocksContext,
   metadataUrl: string,
 ): Promise<Caller> {
   if (verifier === null) {
-    if (IN_LAMBDA) {
+    if (DEPLOYED) {
       throw new Refusal(503, {
         error: 'server_error',
         error_description: 'This deployment has no OAuth configuration.',

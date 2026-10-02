@@ -11,7 +11,7 @@
 AWSで動く Markdown の Wiki です。
 ブラウザーの画面、Amazon Bedrock の AI アシスタント、MCP（Model Context Protocol、AI クライアントとツールを接続する標準プロトコル）のクライアント、Obsidian（ローカルの Markdown ノートアプリ）の同期プラグインは、どれも同じページを読み書きし、API 層がリクエストごとに行う同じ権限判定を通ります。
 
-デプロイするのは Lambda、API Gateway、DynamoDB、S3、CloudFront、Cognito、SQS、Bedrock です。
+デプロイするのは Lambda、API Gateway、DynamoDB、S3、CloudFront、Cognito、SQS、Bedrock です。Bedrock には、AI アシスタントを動かす Bedrock AgentCore Runtime を含みます。
 
 ![ページの閲覧画面。左にスペースのフォルダーとページの木構造、右に Markdown を描画した本文が並ぶ](assets/screenshot-page-ja.png)
 
@@ -41,7 +41,7 @@ AWSで動く Markdown の Wiki です。
 
 ## 構成図
 
-![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザ・MCP・同期クライアントの呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、検索と AI 応答で Bedrock を呼ぶ](assets/architecture.png)
+![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザ・MCP・同期クライアントの呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、検索で Bedrock を呼ぶ。AI アシスタントは、Lambda が起動する Bedrock AgentCore Runtime の上で動く](assets/architecture.png)
 
 *実線の矢印は同期のリクエスト経路を、破線の矢印は非同期の処理の流れを表します。*
 
@@ -71,7 +71,7 @@ AWSで動く Markdown の Wiki です。
 
 - [Node.js 24](https://nodejs.org/) と [pnpm 11](https://pnpm.io/)（npm は使いません。`mise install` が `mise.toml` から両方を入れます）
 - デプロイする場合は、AWS アカウント、[AWS CLI 2.32.0 以上](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)、Amazon Nova 2 Lite と Titan Text Embeddings V2 に対する Bedrock のモデルアクセス
-- CloudFormation のスタックは、AWS CLI のプロファイルに設定されたリージョンへデプロイされます。動作を確認済みなのは `ap-northeast-1`（東京）です。どのリージョンでも、S3 Vectors と上の 2 つの Bedrock のモデルが使える必要があります
+- CloudFormation のスタックは、AWS CLI のプロファイルに設定されたリージョンへデプロイされます。動作を確認済みなのは `ap-northeast-1`（東京）です。どのリージョンでも、S3 Vectors、Bedrock AgentCore Runtime、上の 2 つの Bedrock のモデルが使える必要があります
 
 ## すぐ試す
 
