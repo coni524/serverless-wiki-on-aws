@@ -6,6 +6,8 @@ import {
   BlocksStack,
   BlocksPresets,
   SandboxDisableDeletionProtection,
+  isSandboxContext,
+  registerConfig,
 } from '@aws-blocks/blocks/cdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -24,41 +26,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = new cdk.App();
 
-const sandboxMode = app.node.tryGetContext('sandboxMode') === 'true';
+// The same check the blocks use, so the stack name and preset chosen here can
+// never disagree with `getDeploymentType()` (which also accepts a boolean).
+const sandboxMode = isSandboxContext(app);
 const projectRoot = app.node.tryGetContext('projectRoot') || process.cwd();
 
 const stackName = getStackName({ sandbox: sandboxMode, projectRoot });
 
-// ─── Search corpus bucket name ───────────────────────────────────────────────
-// The KnowledgeBase block reads the corpus from an s3:// source whose bucket name
-// must be a concrete string at synth (it parses the URI) — a block-generated name
-// is a deferred token, so the bucket is created here with a name fixed now. The
-// name is handed to `resources.ts` through the environment *before* the backend
-// is imported below, so the block sees the s3:// source. The same name is
-// injected into the handler further down.
-//
-// The name is a digest of the stack, the account, and the region. All three
-// belong in it: S3 bucket names are unique across every AWS account, so a name
-// that only says "sl-wiki" would be taken by whoever deployed first, and a name
-// that omits the stack would put every stack in one account — a sandbox and the
-// long-running deployment, or two developers' sandboxes — on the same bucket.
-// Only the first one to deploy would get it; the rest fail at the change set
-// with "already exists". A digest rather than the values themselves keeps the
-// account id out of a name that is read from the deploy environment and never
-// committed, and keeps the length inside the 63-character limit.
+// The account and the region are needed at synth: the hosted sign-in domain
+// below is named after a digest of the account, the search grants name the
+// embedding model's ARN in the region, and the stack is pinned to both so that
+// Hosting can place its CloudFront alarm in a us-east-1 companion stack.
 const account = process.env.CDK_DEFAULT_ACCOUNT;
 const region = process.env.CDK_DEFAULT_REGION;
 if (!account || !region) {
   throw new Error(
-    'The search corpus bucket name needs CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION. ' +
+    'The stack needs CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION. ' +
       'Deploy through `pnpm run sandbox` / `pnpm run deploy` with AWS credentials.',
   );
 }
-const corpusBucketName = `sl-wiki-search-corpus-${createHash('sha256')
-  .update(`${stackName}:${account}:${region}`)
-  .digest('hex')
-  .slice(0, 16)}`;
-process.env.SEARCH_CORPUS_BUCKET = corpusBucketName;
 
 // ─── External identity providers: the configured entries ─────────────────────
 // Parsed once, before the backend import below, because `federation.ts` runs
@@ -75,23 +61,28 @@ if (ssoEntries.length > 0) {
 // and DynamoDB point-in-time recovery; the sandbox preset tears down cleanly and
 // lets a localhost frontend reach the deployed API.
 export const blocksStack = await BlocksStack.create(app, stackName, {
+  env: { account, region },
   backendHandlerPath: join(__dirname, 'index.handler.ts'),
   backendCDKPath: join(__dirname, 'index.ts'),
   defaults: sandboxMode ? BlocksPresets.sandbox : BlocksPresets.production,
 });
 
 // The backend module is imported by two computes: the Lambda handler, and the
-// AgentCore Runtime the Agent block runs the assistant's loop and tools on. The
-// runtime does not inherit the handler's environment — the block gives it only
-// the few variables it needs to find the stack — so a value the backend reads
-// from `process.env` is set on both, and the two imports see the same thing.
+// AgentCore Runtime the Agent block runs the assistant's loop and tools on.
+// Both load the stack's config into `process.env` before importing it, but the
+// runtime loads it once, when it starts, and keeps that state for every later
+// session. The runtime is created or updated before the config file is
+// written (the file carries the runtime's ARN), so a runtime can start on a
+// missing or previous config and never see the current one. A value the
+// backend reads is therefore registered as config for the Lambda and also
+// written straight into the runtime's environment.
 //
 // The block exposes no handle to the runtime and no way to add to its
-// environment, so the resource is found by walking the tree, like the knowledge
-// base below, and the variables are written as property overrides. Matched by
-// CloudFormation type and exhaustively: if a future version of the block stops
-// creating exactly one runtime, the synth fails here instead of deploying a
-// runtime whose tools silently run without their settings.
+// environment, so the resource is found by walking the tree and the variables
+// are written as property overrides. Matched by CloudFormation type and
+// exhaustively: if a future version of the block stops creating exactly one
+// runtime, the synth fails here instead of deploying a runtime whose tools
+// silently run without their settings.
 const agentRuntimes = blocksStack.node
   .findAll()
   .filter(
@@ -106,7 +97,7 @@ if (agentRuntimes.length !== 1) {
 const agentRuntime = agentRuntimes[0]!;
 
 function setBackendEnv(name: string, value: string): void {
-  blocksStack.handler.addEnvironment(name, value);
+  registerConfig(blocksStack, name, value);
   agentRuntime.addPropertyOverride(`EnvironmentVariables.${name}`, value);
 }
 
@@ -117,84 +108,80 @@ if (sandboxMode) {
   // Remove these lines if you want to manage teardown behavior yourself.
   RemovalPolicies.of(blocksStack).destroy();
   Mixins.of(blocksStack).apply(new SandboxDisableDeletionProtection());
-
-  // Tell the runtime that cookies need cross-domain attributes (frontend on
-  // localhost, API on API Gateway — different registrable domains).
-  setBackendEnv('BLOCKS_SANDBOX', 'true');
 }
 
-// ─── Search corpus bucket + re-ingestion grant ───────────────────────────────
-// The corpus bucket the KnowledgeBase block imports as its s3:// source. It is
-// created here (not by the block) because its name had to be fixed at synth, and
-// because the app writes to it at runtime, which a block-created source bucket is
-// not set up for. The block only reads it; the handler reads and writes it.
-const corpusBucket = new cdk.aws_s3.Bucket(blocksStack, 'SearchCorpus', {
-  bucketName: corpusBucketName,
-  blockPublicAccess: cdk.aws_s3.BlockPublicAccess.BLOCK_ALL,
-  encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
-  enforceSSL: true,
-  // Match the content bucket / the block's own removal rule: droppable in a
-  // sandbox, retained otherwise so a real deployment never loses its corpus.
-  removalPolicy: sandboxMode ? cdk.RemovalPolicy.DESTROY : cdk.RemovalPolicy.RETAIN,
-  autoDeleteObjects: sandboxMode,
+// ─── Search index ────────────────────────────────────────────────────────────
+// Page text lives in one Amazon S3 Vectors index, searched with its hybrid
+// search (vector + BM25 full text in one `QueryVectors`). See `search-index.ts`.
+// No Building Block covers S3 Vectors directly, so the bucket and index are
+// declared here with the CloudFormation resources.
+//
+// The index must be in ENHANCED mode for full-text search. CloudFormation has
+// no property for the mode; a vector bucket created after 2026-09-30 makes its
+// indexes ENHANCED by default, which a newly created bucket here always is.
+const vectorBucket = new cdk.aws_s3vectors.CfnVectorBucket(blocksStack, 'SearchVectors', {});
+const searchIndex = new cdk.aws_s3vectors.CfnIndex(blocksStack, 'SearchIndex', {
+  vectorBucketArn: vectorBucket.attrVectorBucketArn,
+  dataType: 'float32',
+  // Titan Text Embeddings V2 at 1,024 dimensions (`EMBEDDING_DIMENSION`).
+  dimension: 1024,
+  distanceMetric: 'cosine',
+  metadataConfiguration: {
+    // Full-text fields only; not usable in filters. Fixed at creation.
+    nonFilterableMetadataKeys: ['title', 'body'],
+  },
 });
-corpusBucket.grantReadWrite(blocksStack.handler);
-setBackendEnv('SEARCH_CORPUS_BUCKET', corpusBucketName);
-
-// ─── Keyword index bucket name ───────────────────────────────────────────────
-// The keyword-search index lives in the content FileBucket, one object per
-// space under `search-index/`. The runtime reads and writes those objects with
-// the plain S3 SDK rather than the block API, because its freshness check is
-// `HeadObject`+ETag, which the block does not expose. The SDK needs the
-// bucket's physical name; the handler's read/write permission already exists
-// through the block's own grant. The bucket construct is found by walking the
-// tree, like the knowledge base above — matched exhaustively so a second
-// bucket with "content" in its path fails the synth rather than silently
-// receiving the index.
-const contentBuckets = blocksStack.node
-  .findAll()
-  .filter((node): node is cdk.aws_s3.Bucket => node instanceof cdk.aws_s3.Bucket)
-  .filter((bucket) => bucket.node.path.includes('content'));
-if (contentBuckets.length !== 1) {
-  throw new Error(
-    `Expected exactly one content bucket for the keyword index, found ${contentBuckets.length}.`,
-  );
+// The full-text fields, with the Japanese analyzer. Written as an override
+// because the installed CDK's L1 types predate the property; CloudFormation
+// accepts it and updates it in place.
+searchIndex.addPropertyOverride('MetadataConfiguration.TextSearchConfigurations', [
+  { MetadataKey: 'title', Language: 'ja' },
+  { MetadataKey: 'body', Language: 'ja' },
+]);
+// The CDK's bundled schema predates the property too, so synth prints a
+// "TextSearchConfigurations was unexpected" warning; the CloudFormation
+// registry schema accepts it.
+for (const resource of [vectorBucket, searchIndex]) {
+  // Retained outside a sandbox, like the content bucket: the index can be
+  // rebuilt from the pages (`pnpm run reindex`), but losing it silently
+  // would empty search until then.
+  resource.applyRemovalPolicy(sandboxMode ? cdk.RemovalPolicy.DESTROY : cdk.RemovalPolicy.RETAIN);
 }
-setBackendEnv('KEYWORD_INDEX_BUCKET', contentBuckets[0]!.bucketName);
+
+// The handler and the assistant's AgentCore Runtime run as the same shared
+// role, so this one grant serves both. `GetVectors` is needed beside
+// `QueryVectors` for full-text queries and returned metadata.
+blocksStack.executionRole.addToPrincipalPolicy(
+  new cdk.aws_iam.PolicyStatement({
+    actions: [
+      's3vectors:PutVectors',
+      's3vectors:DeleteVectors',
+      's3vectors:GetVectors',
+      's3vectors:QueryVectors',
+    ],
+    resources: [searchIndex.attrIndexArn],
+  }),
+);
+blocksStack.executionRole.addToPrincipalPolicy(
+  new cdk.aws_iam.PolicyStatement({
+    actions: ['bedrock:InvokeModel'],
+    resources: [`arn:aws:bedrock:${region}::foundation-model/amazon.titan-embed-text-v2:0`],
+  }),
+);
+setBackendEnv('SEARCH_INDEX_ARN', searchIndex.attrIndexArn);
 
 // ─── Conversation model ──────────────────────────────────────────────────────
 // The Agent block resolves its model where it runs, not where it is synthesized:
 // the CDK side provisions the tables, bucket, AgentCore Runtime and WebSocket and
 // never looks at `model`, while the runtime constructor picks it up from the
 // config built during the backend's own import. So `AI_MODEL_ID` has to reach
-// the environment of both computes that import it (see `setBackendEnv`) —
+// both computes that import it (see `setBackendEnv`) —
 // reading it at synth alone would leave every deploy on the default, silently,
 // no matter what the operator passed.
 const modelId = process.env.AI_MODEL_ID;
 if (modelId !== undefined && modelId !== '') {
   setBackendEnv('AI_MODEL_ID', modelId);
 }
-
-// `StartIngestionJob` is the one Bedrock call the block does not wrap and does not
-// grant (it grants Retrieve / Get- / ListIngestionJob). The re-ingestion job calls
-// it directly, so the permission is added here, scoped to the block's own
-// knowledge base. The KB construct is found by walking the tree the backend import
-// built — the block exposes no handle to it.
-const knowledgeBase = blocksStack.node
-  .findAll()
-  .find(
-    (node): node is cdk.aws_bedrock.CfnKnowledgeBase =>
-      node instanceof cdk.aws_bedrock.CfnKnowledgeBase,
-  );
-if (knowledgeBase === undefined) {
-  throw new Error('Expected a Bedrock knowledge base in the stack for the re-ingestion grant.');
-}
-blocksStack.handler.addToRolePolicy(
-  new cdk.aws_iam.PolicyStatement({
-    actions: ['bedrock:StartIngestionJob'],
-    resources: [knowledgeBase.attrKnowledgeBaseArn],
-  }),
-);
 
 // ─── External identity provider: what the runtime reads ──────────────────────
 // `federation.ts` reads these when it decides whether to declare an OIDC
@@ -230,7 +217,7 @@ for (const name of ['SSO_ISSUER_URL', 'SSO_PROVIDERS', 'SSO_GROUPS_CLAIM', 'SSO_
 // None of that is undone below — a second app client is added alongside, for
 // external AI clients only.
 //
-// The pool is found by walking the tree, as the knowledge base above is. The
+// The pool is found by walking the tree, as the runtime above is. The
 // block does expose `userPool` on its CDK class, but reaching it would mean
 // importing `resources.ts` here, and that import resolves to the block's
 // *runtime* class under `tsc --noEmit` (the CDK class is behind an export
@@ -585,11 +572,13 @@ if (!sandboxMode) {
     buildCommand: 'pnpm run build',
     buildOutputDir: 'dist',
     api: blocksStack,
-    // The block's CloudFront 5xx alarm is created in the stack's region, but
-    // CloudFront publishes its metrics only in us-east-1, so anywhere else the
-    // alarm never receives a datapoint and reports OK forever — while the KMS
-    // key that encrypts its topic bills every month. Off until a release of the
-    // block places the alarm in us-east-1 (fixed upstream after hosting 0.3.1).
-    monitoring: { enabled: false },
   });
+  // Monitoring stays at the block's default (on). CloudFront publishes its
+  // metrics only in us-east-1, so the block puts the 5xx alarm and its topic in
+  // a companion stack there, which is why the stack above names its account and
+  // region. The topic is subscribed out of band, once, using the stack output
+  // `MonitoringTopicArnUsEast1`: an address written here would be published,
+  // and the subscription outlives later deploys of the unchanged topic. The
+  // synth keeps warning that the topic has no subscriber, as the block cannot
+  // see one made out of band.
 }

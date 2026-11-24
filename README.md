@@ -10,7 +10,7 @@
 
 A Markdown wiki that runs on AWS. The browser UI, the Amazon Bedrock assistant, MCP clients, and the Obsidian sync plugin read and write the same pages through the same space permission check, resolved in the API layer on every request.
 
-The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQS, and Bedrock, including a Bedrock AgentCore Runtime that runs the AI assistant.
+The deployed stack is Lambda, API Gateway, DynamoDB, S3, S3 Vectors, CloudFront, Cognito, SQS, and Bedrock, including a Bedrock AgentCore Runtime that runs the AI assistant.
 
 ![A page in the wiki: the folder-and-page tree of the space on the left, the rendered Markdown on the right](assets/screenshot-page.png)
 
@@ -31,7 +31,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQ
 - Sign-in is a Cognito email address, and TOTP multi-factor authentication is required of every account. Sign-up is closed: an operator creates accounts, and no API raises anyone's own permissions
 - Sign-in through an identity provider (IdP) as well. Any OIDC provider works from the same settings — Okta, OneLogin, Auth0, Microsoft Entra, Keycloak. Map an IdP group to a role group and permissions are updated to match the IdP's groups on every sign-in. Password sign-in keeps working alongside it
 - AI assistant on Amazon Bedrock: it searches the wiki, answers from what it finds, and edits pages only after you approve the change. The default model is Amazon Nova 2 Lite; set `AI_MODEL_ID` to use another Bedrock model
-- Hybrid search in one box: an inverted index per space, ranked with BM25, finds exact keywords and identifiers; Bedrock Knowledge Bases with S3 Vectors and Titan Text Embeddings V2 finds meaning; the two rankings are fused with Reciprocal Rank Fusion. Results carry a highlighted excerpt, and suggestions appear as you type
+- Search uses the hybrid search of S3 Vectors: one query finds pages by meaning (Titan Text Embeddings V2) and by words (full-text search with the Japanese analyzer), and S3 Vectors fuses the two into one ranking. Results carry a highlighted excerpt, and suggestions appear as you type
 - MCP (Model Context Protocol) server at `POST /mcp`, authenticated with OAuth 2.1 through Cognito, for Claude and other MCP clients
 - Obsidian plugin that syncs a vault and a space in both directions
 - Attachments delivered through presigned URLs; the bucket blocks all public access
@@ -40,7 +40,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, CloudFront, Cognito, SQ
 
 ## Architecture
 
-![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and calls Bedrock for search; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
+![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and searches with S3 Vectors; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
 
 *Solid arrows are the request path; dashed arrows are asynchronous or background flows.*
 
@@ -154,7 +154,7 @@ pnpm run sandbox:destroy   # the sandbox stack, data and all
 pnpm run destroy           # the deployed stack
 ```
 
-`pnpm run sandbox:destroy` deletes the tables and buckets together with the stack. `pnpm run destroy` keeps the DynamoDB table, the content bucket, and the search corpus bucket. They bill for storage until the operator deletes them manually.
+`pnpm run sandbox:destroy` deletes the tables and buckets together with the stack. `pnpm run destroy` keeps the DynamoDB table, the content bucket, and the search vector bucket. They bill for storage until the operator deletes them manually.
 
 ## Configuration
 
@@ -232,7 +232,7 @@ serverless-wiki-on-aws/
 │   ├── index.ts          # API surface the frontend calls
 │   ├── access.ts         # Permission resolution
 │   ├── wiki-ops.ts       # Page, tree, and search operations
-│   ├── keyword-index.ts  # Inverted index: rebuild, search, suggest
+│   ├── search-index.ts   # Search index writes and hybrid search
 │   ├── mcp.ts            # MCP server (POST /mcp)
 │   ├── ext.ts            # Sync-client API (POST /ext/*)
 │   └── scripts/          # deploy, sandbox, seed-admin, destroy
@@ -249,8 +249,8 @@ serverless-wiki-on-aws/
 
 ## Limitations
 
-- **A page you just saved takes a while to appear in search.** The index-rebuild job runs 30 seconds after a save, and the semantic index additionally re-reads every page.
-- **Japanese keyword search occasionally matches unrelated pages.** The body is indexed as two-character sequences (bigrams) instead of through a morphological analyzer, so a page that merely contains the same character pair can match.
+- **Words match as whole words.** The S3 Vectors Japanese analyzer is used as it is, so part of a word ("マネコ" for "リビアヤマネコ") or a different long-vowel spelling ("サーバ" for "サーバー") does not match, and suggestions appear only once a word is typed in full.
+- **The local dev server searches with a plain substring match.** S3 Vectors has no local stand-in; try the hybrid search on a sandbox.
 - **Raw HTML in a body is not rendered.** Markdown is CommonMark plus GFM — tables, task lists, strikethrough — and a single newline is a line break, but a body's own HTML tags are shown as text rather than parsed. A page embeds only its own attachments as images; every other image target renders as a link. Search excerpts are still plain text, so any Markdown in them appears as written.
 - **Creating the first account requires the AWS CLI.** Right after deploying, create an account in Cognito with the AWS CLI, sign in once, then run `pnpm run seed-admin`.
 - **No audit log or request rate limiting.**
@@ -258,7 +258,7 @@ serverless-wiki-on-aws/
 ## Learn More
 
 - [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks) — the Infrastructure-from-Code framework this project is built on
-- [Amazon Bedrock Knowledge Bases](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base.html) — the semantic search backend
+- [Amazon S3 Vectors hybrid search](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-hybrid-search.html) — the search backend
 - [Model Context Protocol](https://modelcontextprotocol.io/) — the protocol the `/mcp` endpoint speaks
 - [Cloudscape Design System](https://cloudscape.design/) — the UI components
 

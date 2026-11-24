@@ -13,7 +13,7 @@ import {
   AuthCognito,
   DistributedTable,
   FileBucket,
-  KnowledgeBase,
+  getDeploymentType,
 } from '@aws-blocks/blocks';
 
 import { itemSchema } from './model.js';
@@ -76,7 +76,7 @@ export const auth = new AuthCognito(scope, 'auth', {
     requireSymbols: true,
   },
   sessionTtlSeconds: 60 * 60 * 24 * 30, // 30 days — shorter than the 400-day default
-  crossDomain: process.env.BLOCKS_SANDBOX === 'true',
+  crossDomain: getDeploymentType() === 'sandbox',
 });
 
 // ─── Permission table ────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ const corsOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '')
   .filter((origin) => origin !== '');
 
 export const content = new FileBucket(scope, 'content', {
-  removalPolicy: process.env.BLOCKS_SANDBOX === 'true' ? 'destroy' : 'retain',
+  removalPolicy: getDeploymentType() === 'sandbox' ? 'destroy' : 'retain',
   // The block turns versioning on unless told otherwise; see above for why it
   // stays off here.
   versioned: false,
@@ -133,38 +133,6 @@ export const content = new FileBucket(scope, 'content', {
         ],
       }
     : {}),
-});
-
-// ─── Search corpus ────────────────────────────────────────────────────────────
-// Semantic search over page text, via the KnowledgeBase block (Bedrock Knowledge
-// Bases + S3 Vectors + Titan Text Embeddings V2). The block indexes a *corpus* of
-// normalized page markdown that `search-corpus.ts` maintains on every save — the
-// block itself has no runtime write API, so the corpus lives on its outside.
-//
-// The block reads its source differently per environment, so the corpus is
-// written to whichever it will read (see `search-corpus.ts`):
-//   - AWS: an s3:// bucket, imported here by name. `index.cdk.ts` creates that
-//     bucket (its name must be fixed at synth, which a block-generated bucket name
-//     is not) and passes it in through `SEARCH_CORPUS_BUCKET` before this module
-//     is imported during synth.
-//   - Local dev: a folder on disk. `s3://` sources are not supported by the mock.
-//
-// The folder name here is the app's own; nothing reads into a block's mock
-// storage. It must match the path `search-corpus.ts` writes to.
-export const SEARCH_CORPUS_LOCAL_DIR = '.search-corpus';
-
-const corpusBucket = process.env.SEARCH_CORPUS_BUCKET;
-
-export const search = new KnowledgeBase(scope, 'search', {
-  source:
-    corpusBucket !== undefined && corpusBucket !== ''
-      ? `s3://${corpusBucket}/`
-      : SEARCH_CORPUS_LOCAL_DIR,
-  description: 'Wiki page text for semantic search',
-  // The S3 Vectors store the block provisions follows the same teardown rule as
-  // the content bucket: dropped in a sandbox, retained otherwise so a real
-  // deployment never silently loses its index (see the block's D-KB-10/-11).
-  removalPolicy: process.env.BLOCKS_SANDBOX === 'true' ? 'destroy' : 'retain',
 });
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────

@@ -1,252 +1,133 @@
 /**
- * Rebuild every space's keyword index, once, from the current search corpus.
+ * Write every page of a deployed stack into its search index, once.
  *
- *   AWS:    AWS_PROFILE=<profile> pnpm run reindex -- --stack <stack-name>
- *   local:  pnpm run reindex -- --local
+ *   AWS_PROFILE=<profile> pnpm run reindex -- --stack <stack-name>
  *
- * The index of a space is normally rebuilt by the debounced job that a page
- * save or delete starts, so a space nobody has edited since a change to the
- * index format keeps whatever it had. That is the gap this closes: after a
- * deployment that changes the format — the titles that title-prefix
- * suggestions match on were added this way — an operator runs this once, and
- * every space is on the current format without waiting for someone to edit a
- * page in it.
+ * Saves and deletes keep the index current on their own. This fills an index
+ * with the pages that existed before it: after the first deploy that creates
+ * it, or if it is ever recreated. Running it again is harmless — each chunk is
+ * written by key and overwrites itself. It only writes: chunks of deleted pages
+ * or leftovers of shrunk pages are not cleaned up here (the indexing job does
+ * that on the next save or delete of the page).
  *
- * It writes exactly what the job writes, through the same `buildIndex`, so
- * there is no second implementation of the format to keep in step. Running it
- * when nothing is stale is harmless: each space is rebuilt from its corpus,
- * which is the same content the job would have read.
+ * It writes through the same `writePage` the indexing job uses, so there is no
+ * second implementation of the vector layout. The table, the content bucket
+ * and the index are looked up in the stack by their logical ids rather than
+ * asked of the operator, so a mistyped name cannot write an index nobody reads.
  *
- * The bucket names are read from the deployed handler's own environment rather
- * than asked of the operator, because that is where the application itself
- * gets them and a mistyped bucket would write an index nobody reads.
+ * There is no local mode: the dev server searches pages directly and has no
+ * index to fill.
  */
 import { execFile } from 'node:child_process';
-import {
-  GetObjectCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { promisify } from 'node:util';
 
-import {
-  KEYWORD_INDEX_LOCAL_DIR,
-  buildIndex,
-  titleOfCorpus,
-  type SerializedIndex,
-} from '../keyword-index.js';
-import { SEARCH_CORPUS_LOCAL_DIR } from '../resources.js';
+import { ALL_SPACES, META, PAGE_SK_PREFIX, idOf, spacePk } from '../model.js';
 
 const run = promisify(execFile);
 
-/** One AWS CLI call, parsed as JSON. The operator's `aws` already has credentials. */
 async function awsCli(args: string[]): Promise<Record<string, unknown>> {
-  const { stdout } = await run('aws', [...args, '--output', 'json']);
+  const { stdout } = await run('aws', [...args, '--output', 'json'], {
+    maxBuffer: 32 * 1024 * 1024,
+  });
   return stdout.trim() === '' ? {} : (JSON.parse(stdout) as Record<string, unknown>);
 }
 
-/** The corpus and index buckets, as the deployed handler knows them. */
-async function bucketsOf(stackName: string): Promise<{ corpus: string; index: string }> {
-  const resources = (await awsCli([
-    'cloudformation',
-    'describe-stack-resources',
-    '--stack-name',
-    stackName,
-  ])) as { StackResources?: { ResourceType?: string; PhysicalResourceId?: string }[] };
-  const functions = (resources.StackResources ?? [])
-    .filter((resource) => resource.ResourceType === 'AWS::Lambda::Function')
-    .map((resource) => resource.PhysicalResourceId)
-    .filter((id): id is string => id !== undefined);
-
-  for (const functionName of functions) {
-    const config = (await awsCli([
-      'lambda',
-      'get-function-configuration',
-      '--function-name',
-      functionName,
-    ])) as { Environment?: { Variables?: Record<string, string> } };
-    const variables = config.Environment?.Variables ?? {};
-    const corpus = variables.SEARCH_CORPUS_BUCKET;
-    const index = variables.KEYWORD_INDEX_BUCKET;
-    if (corpus !== undefined && corpus !== '' && index !== undefined && index !== '') {
-      return { corpus, index };
-    }
-  }
-  throw new Error(
-    `No function in ${stackName} carries SEARCH_CORPUS_BUCKET and KEYWORD_INDEX_BUCKET.\n` +
-      'Check the stack name with: aws cloudformation list-stacks',
+/** The one resource of a type whose logical id starts with `prefix`. */
+function resourceOf(
+  resources: { ResourceType?: string; LogicalResourceId?: string; PhysicalResourceId?: string }[],
+  type: string,
+  prefix: string,
+): string {
+  const found = resources.filter(
+    (resource) => resource.ResourceType === type && resource.LogicalResourceId?.startsWith(prefix),
   );
-}
-
-/** Where a space's documents and its index live, on either backend. */
-type Store = {
-  /** The id of every space that has a corpus. */
-  spaceIds(): Promise<string[]>;
-  /** One space's documents, `[pageId, markdown]`. */
-  documents(spaceId: string): Promise<{ pageId: string; text: string }[]>;
-  writeIndex(spaceId: string, index: SerializedIndex): Promise<void>;
-};
-
-function awsStore(buckets: { corpus: string; index: string }): Store {
-  const s3 = new S3Client({});
-  const listAll = async (prefix: string | undefined, delimiter: string | undefined) => {
-    const keys: string[] = [];
-    const prefixes: string[] = [];
-    let continuationToken: string | undefined;
-    do {
-      const page = await s3.send(
-        new ListObjectsV2Command({
-          Bucket: buckets.corpus,
-          ...(prefix === undefined ? {} : { Prefix: prefix }),
-          ...(delimiter === undefined ? {} : { Delimiter: delimiter }),
-          ContinuationToken: continuationToken,
-        }),
-      );
-      for (const object of page.Contents ?? []) {
-        if (object.Key !== undefined) keys.push(object.Key);
-      }
-      for (const common of page.CommonPrefixes ?? []) {
-        if (common.Prefix !== undefined) prefixes.push(common.Prefix);
-      }
-      continuationToken = page.NextContinuationToken;
-    } while (continuationToken !== undefined);
-    return { keys, prefixes };
-  };
-
-  return {
-    async spaceIds() {
-      // The corpus lays documents out as `<spaceId>/<pageId>.md`, so the
-      // top-level common prefixes are exactly the spaces.
-      const { prefixes } = await listAll(undefined, '/');
-      return prefixes.map((prefix) => prefix.replace(/\/$/, ''));
-    },
-    async documents(spaceId) {
-      const prefix = `${spaceId}/`;
-      const { keys } = await listAll(prefix, undefined);
-      // `.metadata.json` sidecars are routing data, not text.
-      const documents = keys.filter((key) => key.endsWith('.md'));
-      return await Promise.all(
-        documents.map(async (key) => {
-          const object = await s3.send(
-            new GetObjectCommand({ Bucket: buckets.corpus, Key: key }),
-          );
-          return {
-            pageId: key.slice(prefix.length, -'.md'.length),
-            text: (await object.Body?.transformToString('utf8')) ?? '',
-          };
-        }),
-      );
-    },
-    async writeIndex(spaceId, index) {
-      await s3.send(
-        new PutObjectCommand({
-          Bucket: buckets.index,
-          Key: `search-index/${spaceId}.json`,
-          Body: JSON.stringify(index),
-          ContentType: 'application/json',
-        }),
-      );
-    },
-  };
-}
-
-function localStore(): Store {
-  return {
-    async spaceIds() {
-      try {
-        return await readdir(SEARCH_CORPUS_LOCAL_DIR);
-      } catch {
-        return [];
-      }
-    },
-    async documents(spaceId) {
-      let names: string[];
-      try {
-        names = await readdir(join(SEARCH_CORPUS_LOCAL_DIR, spaceId));
-      } catch {
-        return [];
-      }
-      return await Promise.all(
-        names
-          .filter((name) => name.endsWith('.md'))
-          .map(async (name) => ({
-            pageId: name.slice(0, -'.md'.length),
-            text: await readFile(join(SEARCH_CORPUS_LOCAL_DIR, spaceId, name), 'utf8'),
-          })),
-      );
-    },
-    async writeIndex(spaceId, index) {
-      await mkdir(KEYWORD_INDEX_LOCAL_DIR, { recursive: true });
-      await writeFile(
-        join(KEYWORD_INDEX_LOCAL_DIR, `${spaceId}.json`),
-        JSON.stringify(index),
-        'utf8',
-      );
-    },
-  };
-}
-
-/** Rebuild every space, reporting one line each. */
-export async function reindex(
-  store: Store,
-  log: (line: string) => void = console.log,
-): Promise<void> {
-  const spaceIds = await store.spaceIds();
-  log(`${spaceIds.length} space(s) with a corpus.`);
-  for (const spaceId of spaceIds) {
-    const documents = await store.documents(spaceId);
-    if (documents.length === 0) {
-      // A space whose corpus is empty has no index to write: the job removes
-      // the file in that case, and one that was never written is already gone.
-      log(`  ${spaceId}: no documents, left alone`);
-      continue;
-    }
-    const index = buildIndex(
-      documents.map((doc) => ({ ...doc, title: titleOfCorpus(doc.text) })),
-    );
-    await store.writeIndex(spaceId, index);
-    log(
-      `  ${spaceId}: ${documents.length} docs, ` +
-        `${Object.keys(index.postings).length} terms, ` +
-        `${Buffer.byteLength(JSON.stringify(index))} bytes`,
-    );
+  if (found.length !== 1 || found[0]!.PhysicalResourceId === undefined) {
+    throw new Error(`Expected one ${type} named ${prefix}* in the stack, found ${found.length}.`);
   }
+  return found[0]!.PhysicalResourceId;
 }
 
-function usage(): never {
-  console.error(
-    'Usage:\n' +
-      '  pnpm run reindex -- --stack <stack-name>   (deployed stack)\n' +
-      '  pnpm run reindex -- --local                (local dev folders)\n',
-  );
-  process.exit(1);
+type Wire = Record<string, { S?: string }>;
+
+/** Every item of a query, followed to the end rather than trusting one call. */
+async function queryAll(tableName: string, args: string[]): Promise<Wire[]> {
+  const items: Wire[] = [];
+  let startKey: string | undefined;
+  for (;;) {
+    const result = await awsCli([
+      'dynamodb',
+      'query',
+      '--table-name',
+      tableName,
+      ...args,
+      ...(startKey === undefined ? [] : ['--exclusive-start-key', startKey]),
+    ]);
+    items.push(...((result.Items ?? []) as Wire[]));
+    if (result.LastEvaluatedKey === undefined) return items;
+    startKey = JSON.stringify(result.LastEvaluatedKey);
+  }
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const at = args.indexOf('--stack');
-  const stackName = at === -1 ? undefined : args[at + 1];
-  const local = args.includes('--local');
-  if (local === (stackName !== undefined)) usage();
-
-  if (local) {
-    await reindex(localStore());
-    return;
-  }
-  const buckets = await bucketsOf(stackName as string);
-  console.log(`corpus: ${buckets.corpus}\nindex:  ${buckets.index}`);
-  await reindex(awsStore(buckets));
-}
-
-// Guarded so the module can be imported without the CLI running too.
-const thisFile = fileURLToPath(import.meta.url);
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === thisFile) {
-  await main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
+  const stackName = args[args.indexOf('--stack') + 1];
+  if (!args.includes('--stack') || stackName === undefined) {
+    console.error('Usage: AWS_PROFILE=<profile> pnpm run reindex -- --stack <stack-name>');
     process.exit(1);
-  });
+  }
+
+  const { StackResourceSummaries: resources = [] } = (await awsCli([
+    'cloudformation',
+    'list-stack-resources',
+    '--stack-name',
+    stackName,
+  ])) as { StackResourceSummaries?: Parameters<typeof resourceOf>[0] };
+  const tableName = resourceOf(resources, 'AWS::DynamoDB::Table', 'slwikipermissionstable');
+  const bucket = resourceOf(resources, 'AWS::S3::Bucket', 'slwikicontentbucket');
+  // `search-index.ts` reads the index from the environment when it loads.
+  process.env.SEARCH_INDEX_ARN = resourceOf(resources, 'AWS::S3Vectors::Index', 'SearchIndex');
+  const { writePage } = await import('../search-index.js');
+
+  const s3 = new S3Client({});
+  const spaces = await queryAll(tableName, [
+    '--index-name',
+    'gsi1',
+    '--key-condition-expression',
+    'gsi1pk = :pk',
+    '--expression-attribute-values',
+    JSON.stringify({ ':pk': { S: ALL_SPACES } }),
+  ]);
+  const spaceIds = spaces
+    .filter((item) => item.sk?.S === META && item.pk?.S !== undefined)
+    .map((item) => idOf(item.pk!.S!));
+
+  let written = 0;
+  for (const spaceId of spaceIds) {
+    const items = await queryAll(tableName, [
+      '--key-condition-expression',
+      'pk = :pk AND begins_with(sk, :sk)',
+      '--expression-attribute-values',
+      JSON.stringify({ ':pk': { S: spacePk(spaceId) }, ':sk': { S: PAGE_SK_PREFIX } }),
+    ]);
+    for (const item of items) {
+      // Folders carry no text and are not indexed.
+      if (item.type?.S !== 'PAGE' || (item.kind?.S ?? 'page') !== 'page') continue;
+      const bodyKey = item.bodyKey?.S;
+      const object =
+        bodyKey === undefined
+          ? undefined
+          : await s3.send(new GetObjectCommand({ Bucket: bucket, Key: bodyKey }));
+      await writePage({
+        spaceId,
+        pageId: idOf(item.sk!.S!),
+        title: item.title?.S ?? '',
+        body: (await object?.Body?.transformToString('utf8')) ?? '',
+      });
+      written += 1;
+    }
+  }
+  console.log(`Indexed ${written} pages in ${spaceIds.length} spaces.`);
 }
+
+await main();

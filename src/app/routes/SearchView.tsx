@@ -16,11 +16,12 @@ import type { SearchItem } from '@/types/api';
 import { hrefPage, hrefSearch, navigate } from '@/lib/router';
 
 /**
- * Search results — semantic and keyword hits, fused by the backend into one
- * list. The backend collapses chunks to pages, filters them by permission,
- * and attaches live titles and snippets before returning, so this view only
- * renders what it is given. The one shaping it does: a snippet's `highlights`
- * ranges — where the keyword search matched — are rendered emboldened.
+ * Search results — hits by meaning and by words, ranked as one list by the
+ * search index. The backend collapses chunks to pages, filters them by
+ * permission, and attaches live titles and snippets before returning, so this
+ * view only renders what it is given. The one shaping it does: a snippet's
+ * `highlights` ranges — where the query's words matched — are rendered
+ * emboldened.
  */
 export function SearchView({ query, spaceId }: { query: string; spaceId: string | null }) {
   const t = useT();
@@ -52,8 +53,9 @@ export function SearchView({ query, spaceId }: { query: string; spaceId: string 
           actions={
             q !== '' ? (
               // The hash does not change on a same-query resubmit, so this is
-              // the way to retry while waiting out the re-ingestion delay. The
-              // results already found stay on screen while it runs.
+              // the way to retry — a page saved a moment ago reaches the index
+              // a few seconds later. The results already found stay on screen
+              // while it runs.
               <Button iconName="refresh" loading={isFetching} onClick={() => void refetch()}>
                 {t.page.searchAgain}
               </Button>

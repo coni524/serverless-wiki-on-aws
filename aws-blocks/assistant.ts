@@ -21,7 +21,7 @@
  *    write it, a sentence in a page body ("act as the administrator") would be
  *    enough to impersonate someone.
  */
-import { Agent } from '@aws-blocks/blocks';
+import { Agent, getDeploymentType } from '@aws-blocks/blocks';
 import { ApiError } from '@aws-blocks/core';
 import { z } from 'zod';
 
@@ -55,7 +55,7 @@ import { unescapeModelNewlines } from './model-text.js';
  * than the bare model. `jp.amazon.nova-2-lite-v1:0` (inference confined to
  * Tokyo and Osaka), `global.anthropic.claude-sonnet-4-6` (stronger tool
  * selection, higher price), and `global.anthropic.claude-sonnet-5` (stronger
- * still; needs the thinking switch-off below) are the documented swaps.
+ * still) are the documented swaps.
  *
  * An environment variable rather than an `AppSetting`, because the block wants a
  * settled string for `modelId` and an AppSetting resolves asynchronously — the
@@ -72,30 +72,6 @@ const MODEL_ID =
   process.env.AI_MODEL_ID === undefined || process.env.AI_MODEL_ID === ''
     ? 'global.amazon.nova-2-lite-v1:0'
     : process.env.AI_MODEL_ID;
-
-/**
- * Claude 5-generation models run extended thinking by default, and by default
- * the thinking *text* is omitted from the response — the block only carries a
- * signature. The Strands SDK under the Agent block (1.3.0 when this was written)
- * refused to replay such a block on the next turn ("reasoning content format
- * incorrect"), so any tool call — which always triggers a second model call —
- * failed. The block now ships Strands 1.19, which may accept text-less blocks;
- * that is unverified against a real model, so the workaround stays.
- *
- * Until the SDK handles text-less reasoning blocks, thinking is switched off
- * for these models via Bedrock's `additionalModelRequestFields`. Older Claude
- * models and Nova default to no thinking and must not receive the field —
- * Nova rejects the Anthropic-specific key outright.
- *
- * `additionalRequestFields` reaches Bedrock through a local patch on the Agent
- * block (`patches/@aws-blocks__bb-agent.patch`) — the block forwards only
- * temperature/topP/maxTokens/stopSequences on its own. Drop the patch and this
- * branch when the block passes the field through natively.
- */
-const THINKING_ON_BY_DEFAULT = /\banthropic\.claude-(sonnet|opus|fable|mythos)-5\b/;
-const MODEL_EXTRA_FIELDS = THINKING_ON_BY_DEFAULT.test(MODEL_ID)
-  ? { additionalRequestFields: { thinking: { type: 'disabled' } } }
-  : {};
 
 /**
  * The prompt, including the paragraph that teaches the model to read the screen
@@ -181,7 +157,7 @@ async function answering<T>(run: () => Promise<T>): Promise<T | { error: string 
 }
 
 export const assistant = new Agent(scope, 'assistant', {
-  model: { deployed: { provider: 'bedrock', modelId: MODEL_ID, ...MODEL_EXTRA_FIELDS } },
+  model: { deployed: { provider: 'bedrock', modelId: MODEL_ID } },
   systemPrompt: SYSTEM_PROMPT,
   // Text is published as it arrives, so the panel types the answer out rather
   // than sitting silent until a whole block completes.
@@ -193,7 +169,7 @@ export const assistant = new Agent(scope, 'assistant', {
   toolContextSchema,
   // The sessions bucket follows the same teardown rule as the content bucket:
   // dropped in a sandbox, kept otherwise (see `resources.ts`).
-  removalPolicy: process.env.BLOCKS_SANDBOX === 'true' ? 'destroy' : 'retain',
+  removalPolicy: getDeploymentType() === 'sandbox' ? 'destroy' : 'retain',
   tools: (tool) => ({
     searchWiki: tool({
       description:
@@ -206,6 +182,9 @@ export const assistant = new Agent(scope, 'assistant', {
           .describe('The space id to confine the search to. Omitted, the search spans every space'),
         limit: z.number().optional().describe('How many hits to return at most (5 by default, 50 at most)'),
       }),
+      // Titles and excerpts are text the wiki's users wrote: the block wraps the
+      // result so the model reads it as data, never as instructions to follow.
+      untrustedOutput: true,
       handler: async ({ input, context }) =>
         answering(async () => {
           const access = await actingFor(context);
@@ -226,8 +205,8 @@ export const assistant = new Agent(scope, 'assistant', {
     }),
 
     listSpaces: tool({
-      // Search alone cannot name a space that has no pages in it: the corpus is
-      // built from page bodies, so an empty space produces no hit and the model
+      // Search alone cannot name a space that has no pages in it: the index is
+      // built from pages, so an empty space produces no hit and the model
       // never learns its id. Without this tool the assistant cannot create the
       // first page of a space — found while evaluating the real model, and the
       // same reason the MCP server has carried this tool from the start.
@@ -236,6 +215,8 @@ export const assistant = new Agent(scope, 'assistant', {
       description:
         'List the spaces the user is allowed to read. Use it before creating a page, to find out which space can be written to.',
       parameters: z.object({}),
+      // Space names and descriptions are free text written by administrators.
+      untrustedOutput: true,
       handler: async ({ context }) =>
         answering(async () => {
           const access = await actingFor(context);
@@ -257,6 +238,8 @@ export const assistant = new Agent(scope, 'assistant', {
       description:
         'Fetch the body of one page by its page id. Use it when the excerpt from searchWiki is not enough to answer.',
       parameters: z.object({ pageId: z.string().describe('The page id') }),
+      // The body is text the wiki's users wrote.
+      untrustedOutput: true,
       handler: async ({ input, context }) =>
         answering(async () => {
           const access = await actingFor(context);
@@ -314,6 +297,9 @@ export const assistant = new Agent(scope, 'assistant', {
           ),
       }),
       needsApproval: true,
+      // The result carries the page as stored, so a title left unchanged is
+      // text another user wrote.
+      untrustedOutput: true,
       handler: async ({ input, context }) =>
         answering(async () => {
           const access = await actingFor(context);

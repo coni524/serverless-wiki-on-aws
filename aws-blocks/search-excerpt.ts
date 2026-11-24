@@ -1,15 +1,14 @@
 /**
- * Excerpts for keyword search hits — the text around the matched terms, with
- * the matched ranges reported so the UI can embolden them.
+ * Excerpts for full-text search hits — the text around the matched words,
+ * with the matched ranges reported so the UI can embolden them.
  *
- * The index keeps only term frequencies, never positions, so the excerpt is
- * built here instead: the caller reads the hit page's corpus document and
- * hands it to `excerptOf` together with the query. Everything in
- * this module is pure string work, which is what makes it unit-testable.
+ * The search index returns the matching chunk's text but not where in it the
+ * words matched, so the excerpt is built here: the caller hands the chunk to
+ * `excerptOf` together with the query. Everything in this module is pure
+ * string work, which is what makes it unit-testable.
  *
- * Matching repeats the searcher's normalization — NFKC, lowercased — but keeps
- * each query run whole as a phrase instead of cutting it into bigrams: the
- * excerpt should embolden "東京タワー", not four overlapping fragments of it.
+ * Matching is NFKC-normalized and lowercased, and keeps each query run whole
+ * as a phrase: the excerpt should embolden "東京タワー", not fragments of it.
  * The normalization is done per composition group with a map back into the
  * original string, so the emphasized ranges land on the text as the author
  * wrote it, full-width characters and all.
@@ -32,20 +31,16 @@ export type Excerpt = {
 /**
  * The literal phrases a query asks for: its runs of word characters, whole.
  *
- * The same run boundaries as the tokenizer (ASCII alphanumerics and other
- * letters/digits split at their meeting point), so what the searcher treated
- * as one unit is what gets emphasized as one unit. That includes the
- * tokenizer's blind spot: a single non-ASCII character yields no bigram and
- * never participated in the match, so it must not be emphasized either — and
- * being first in the text, it would steal the excerpt window from the phrase
- * that actually hit. A single ASCII character is a real term and stays.
+ * Runs split where ASCII alphanumerics meet other letters/digits ("abc東京" is
+ * two phrases). A single character is a phrase too: the analyzer can match a
+ * one-character word such as "猫".
  */
 export function queryPhrases(query: string): string[] {
   const phrases: string[] = [];
   let run: string[] = [];
   let runClass: 'ascii' | 'word' | null = null;
   const flush = () => {
-    if (run.length > 0 && (runClass === 'ascii' || run.length >= 2)) {
+    if (run.length > 0) {
       phrases.push(run.join(''));
     }
     run = [];
@@ -123,9 +118,10 @@ const flat = (text: string) => text.replace(/\s+/g, ' ');
 /**
  * Build the excerpt of `text` around the first place `query` matches.
  *
- * No phrase found — the bigram AND can pass on terms scattered through the
- * page — degrades to the head of the text with no highlights, so the caller
- * can tell a real excerpt (`highlights` non-empty) from the fallback.
+ * No phrase found — the analyzer matches words, which need not appear in the
+ * text exactly as typed — degrades to the head of the text with no highlights,
+ * so the caller can tell a real excerpt (`highlights` non-empty) from the
+ * fallback.
  */
 export function excerptOf(text: string, query: string): Excerpt {
   const { norm, map } = normalizedWithMap(text);

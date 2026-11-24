@@ -10,11 +10,11 @@ import { hrefNode, hrefSearch, navigate, useRoute } from '@/lib/router';
  * an already space-scoped result list — keeps that space as the scope;
  * SearchView offers the link out to a cross-space search.
  *
- * Typing opens a list of suggestions from `api.suggest`, which matches title
- * prefixes and the keyword index only — both answer out of the handler's
- * memory, which is what makes them affordable per keystroke. Picking one jumps
- * straight to that page; pressing Enter runs the full search, semantic half
- * included, and lands on the result list.
+ * Typing opens a list of suggestions from `api.suggest`, which runs the
+ * full-text search only — no embedding, so it is affordable per keystroke. It
+ * matches whole words, so a word still being typed suggests nothing until it is
+ * complete. Picking one jumps straight to that page; pressing Enter runs the
+ * full search, meaning included, and lands on the result list.
  */
 
 /** How long the typing has to settle before a request goes out. */

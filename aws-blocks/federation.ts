@@ -30,7 +30,7 @@
  * authorization path this project is built on — a claim cannot become a second
  * way to be permitted.
  */
-import { AppSetting, AuthOIDC, customOidc, stubIdp } from '@aws-blocks/blocks';
+import { AppSetting, AuthOIDC, customOidc, getDeploymentType, stubIdp } from '@aws-blocks/blocks';
 import type { OIDCUser } from '@aws-blocks/blocks';
 import { ApiError } from '@aws-blocks/core';
 
@@ -240,7 +240,7 @@ export const oidcAuth =
         // served from localhost while the API answers from API Gateway, which
         // are different registrable domains, and a `SameSite=Lax` cookie would
         // not survive the round trip.
-        crossDomain: process.env.BLOCKS_SANDBOX === 'true',
+        crossDomain: getDeploymentType() === 'sandbox',
       })
     : null;
 

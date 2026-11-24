@@ -1,0 +1,14 @@
+diff --git a/dist/index.cdk.js b/dist/index.cdk.js
+--- a/dist/index.cdk.js
++++ b/dist/index.cdk.js
+@@ -91,6 +91,10 @@ export class LambdaCompute extends ComputeBase {
+             // at Lambda load. See core's ./cdk/bundling.ts.
+             bundling: blocksNodejsBundling({
+                 minify: true,
++                // Ship the SDK with the function instead of using the runtime's copy,
++                // which lags behind: a client feature newer than the runtime's SDK
++                // would otherwise be silently dropped from requests.
++                bundleAwsSDK: true,
+                 esbuildArgs: { '--conditions': 'aws-runtime' },
+             }),
+             // VPC placement, when a VPC is configured. Spread conditionally so the

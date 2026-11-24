@@ -11,7 +11,7 @@
 AWSで動く Markdown の Wiki です。
 ブラウザーの画面、Amazon Bedrock の AI アシスタント、MCP（Model Context Protocol、AI クライアントとツールを接続する標準プロトコル）のクライアント、Obsidian（ローカルの Markdown ノートアプリ）の同期プラグインは、どれも同じページを読み書きし、API 層がリクエストごとに行う同じ権限判定を通ります。
 
-デプロイするのは Lambda、API Gateway、DynamoDB、S3、CloudFront、Cognito、SQS、Bedrock です。Bedrock には、AI アシスタントを動かす Bedrock AgentCore Runtime を含みます。
+デプロイするのは Lambda、API Gateway、DynamoDB、S3、S3 Vectors、CloudFront、Cognito、SQS、Bedrock です。Bedrock には、AI アシスタントを動かす Bedrock AgentCore Runtime を含みます。
 
 ![ページの閲覧画面。左にスペースのフォルダーとページの木構造、右に Markdown を描画した本文が並ぶ](assets/screenshot-page-ja.png)
 
@@ -32,7 +32,7 @@ AWSで動く Markdown の Wiki です。
 - サインインは Cognito に登録したメールアドレスとパスワードで行い、すべてのアカウントに TOTP（Time-based One-Time Password、認証アプリが出す時限式のワンタイムパスワード）の MFA（多要素認証）を必須にします。利用者が自分でサインアップすることはできず、運用者がアカウントを作ります。自分の権限を上げる API はありません
 - IdP（Identity Provider、認証情報の提供元）でのサインインにも対応します。OIDC（OpenID Connect）に対応した IdP（Okta、OneLogin、Auth0、Microsoft Entra、Keycloak など）なら、どれも同じ設定でつながります。IdP のグループをロールグループに対応づけると、サインインのたびに権限が IdP のグループに合わせて更新されます。パスワードでのサインインと併用できます
 - Amazon Bedrock の AI アシスタントが Wiki を検索し、見つけた内容から答え、利用者が承認したときだけページを書き換えます。既定のモデルは Amazon Nova 2 Lite で、環境変数 `AI_MODEL_ID` で別の Bedrock のモデルに変更できます
-- 検索窓は 1 つで、2 通りの検索を融合します。スペースごとの転置インデックス（語からその語を含む文書の一覧を引く索引）を BM25（語の珍しさと出現回数から重要度を出す式）で順位付けして完全一致の語や識別子を引き、Bedrock Knowledge Bases と S3 Vectors（ベクトル検索用のストレージ）と Titan Text Embeddings V2 が意味の近いページを引き、両方の順位を RRF（Reciprocal Rank Fusion、順位の逆数を足し合わせて 1 つに融合する手法）で並べ直します。結果にはヒット箇所の抜粋が付き、入力の途中でサジェストが出ます
+- 検索は S3 Vectors（ベクトル検索用のストレージ）のハイブリッド検索を使います。1 回の問い合わせで、意味の近いページ（埋め込みは Titan Text Embeddings V2）と、語が一致するページ（日本語の解析器による全文検索）の両方を引き、S3 Vectors が 1 つの順位に融合します。結果にはヒット箇所の抜粋が付き、入力の途中でサジェストが出ます
 - `POST /mcp` の MCP サーバーが、Cognito を認可サーバーとする OAuth 2.1 の認証で、Claude などの MCP クライアントからの接続を受け付けます
 - Obsidian の保管庫とスペースを双方向に同期するプラグインを同梱しています
 - 添付ファイルは presigned URL（署名付き URL、短時間だけ有効なリンク）で配信します。バケットはパブリックアクセスを全面ブロックします
@@ -41,7 +41,7 @@ AWSで動く Markdown の Wiki です。
 
 ## 構成図
 
-![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザ・MCP・同期クライアントの呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、検索で Bedrock を呼ぶ。AI アシスタントは、Lambda が起動する Bedrock AgentCore Runtime の上で動く](assets/architecture.png)
+![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザ・MCP・同期クライアントの呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、S3 Vectors で検索する。AI アシスタントは、Lambda が起動する Bedrock AgentCore Runtime の上で動く](assets/architecture.png)
 
 *実線の矢印は同期のリクエスト経路を、破線の矢印は非同期の処理の流れを表します。*
 
@@ -169,7 +169,7 @@ pnpm run destroy           # デプロイしたスタックを消します
 ```
 
 `pnpm run sandbox:destroy` は、テーブルもバケットもスタックと一緒に消します。
-`pnpm run destroy` は、DynamoDB のテーブル、本文と添付のバケット、検索コーパスのバケットを残す設定です。
+`pnpm run destroy` は、DynamoDB のテーブル、本文と添付のバケット、検索用のベクトルバケットを残す設定です。
 残っているあいだは保存の料金がかかります。消すときは運用者が手動で削除します。
 
 ## 設定
@@ -255,7 +255,7 @@ serverless-wiki-on-aws/
 │   ├── index.ts          # フロントエンドが呼ぶ API
 │   ├── access.ts         # 権限判定
 │   ├── wiki-ops.ts       # ページ、ツリー、検索の操作
-│   ├── keyword-index.ts  # 転置インデックスの構築、検索、サジェスト
+│   ├── search-index.ts   # 検索の索引への書き込みとハイブリッド検索
 │   ├── mcp.ts            # MCP サーバー（POST /mcp）
 │   ├── ext.ts            # 同期クライアント向け API（POST /ext/*）
 │   └── scripts/          # deploy、sandbox、seed-admin、destroy
@@ -272,8 +272,8 @@ serverless-wiki-on-aws/
 
 ## 制約
 
-- **保存したページが検索に出るまで、少し時間がかかります。** 索引を作り直すジョブが保存の 30 秒後に動き、意味検索の索引はさらに全ページを読み直すためです。
-- **日本語のキーワード検索は、まれに無関係なページに一致します。** 形態素解析器（辞書を持ち文を単語に分ける解析器）を使わず、本文を 2 文字ずつの並び（bigram）で索引にしているため、同じ 2 文字の並びを含むだけのページも一致します。
+- **語の一致は単語の単位で判定します。** S3 Vectors の日本語の解析器をそのまま使っているためです。語の途中（「マネコ」で「リビアヤマネコ」）や、長音の有無の違い（「サーバ」と「サーバー」）では一致しません。入力途中のサジェストも、語を打ち終えるまで出ません。
+- **手元の開発サーバーでは、検索は部分一致の簡易版で動きます。** S3 Vectors に手元で動く代わりが無いためです。ハイブリッド検索の結果は sandbox で確かめます。
 - **本文の中の生の HTML は描画しません。** Markdown は CommonMark（Markdown の標準仕様）に GFM（GitHub Flavored Markdown、GitHub 方言）の表・タスクリスト・取り消し線を足した範囲を描画し、1 つだけの改行も改行として扱いますが、本文に書いた HTML タグは解釈せず、文字のまま表示します。画像として埋め込めるのはそのページ自身の添付だけで、それ以外の画像はリンクとして表示します。検索結果の抜粋は Markdown を解釈せず、記法を記号のまま表示します。
 - **最初のアカウントの作成には AWS CLI の操作が必要です。** デプロイ直後に、運用者が AWS CLI で Cognito にアカウントを作り、一度サインインしてから `pnpm run seed-admin` を実行します。
 - **監査ログと、API のレートリミット（呼び出し回数の制限）はありません。**
@@ -281,7 +281,7 @@ serverless-wiki-on-aws/
 ## 参考
 
 - [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks)：このプロジェクトの実装基盤
-- [Amazon Bedrock Knowledge Bases](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base.html)：意味検索の基盤
+- [Amazon S3 Vectors のハイブリッド検索](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-hybrid-search.html)：検索の基盤
 - [Model Context Protocol](https://modelcontextprotocol.io/)：`/mcp` エンドポイントのプロトコル
 - [Cloudscape Design System](https://cloudscape.design/)：画面に使っている UI 部品のデザインシステム
 

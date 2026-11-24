@@ -60,8 +60,7 @@ import {
   listAttachments as listPageAttachments,
 } from './attachment-ops.js';
 import { reclaimJob } from './reclaim.js';
-import { requestKeywordIndex } from './keyword-index.js';
-import { deleteCorpusBatch, requestReingest } from './search-corpus.js';
+import { requestSync } from './search-index.js';
 import {
   type ViewingClaim,
   createFolder as createWikiFolder,
@@ -385,7 +384,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   // ─── Search ──────────────────────────────────────────────────────────────
 
   /**
-   * Search over page text, semantic and keyword fused into one ranking.
+   * Search over page text, by meaning and by words in one ranking.
    *
    * The work is in `searchPages`, which the assistant's `searchWiki` tool calls
    * too — including the `filterReadable` gate every hit passes through.
@@ -398,9 +397,9 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   /**
    * Suggestions while the query is still being typed.
    *
-   * Called on keystrokes, so it runs only the searches that answer from the
-   * handler's own memory — see `suggestPages`, which also holds the same
-   * `filterReadable` gate the full search passes through.
+   * Called on keystrokes, so it runs the full-text search only — see
+   * `suggestPages`, which also holds the same `filterReadable` gate the full
+   * search passes through.
    */
   async suggest(query: string, options?: { spaceId?: string; limit?: number }) {
     const access = await requireAccess(context);
@@ -649,23 +648,15 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
         }),
       );
       if (batch.length === 0) break;
-      // Corpus documents go with the page metadata, one round at a time, so a
-      // re-invocation after a timeout resumes cleanly — the pages whose corpus
-      // is gone are the same ones whose metadata is gone. Best-effort: a corpus
-      // delete that fails must not strand the space delete (a derived-index ghost
-      // is dropped on read), so it is swallowed and the metadata delete proceeds.
-      await deleteCorpusBatch(batch.map((item) => ({ spaceId, pageId: idOf(item.sk) }))).catch(
-        () => {},
-      );
       await deletePageRecords(batch);
+      // Search drops the pages once their records are gone (the job removes a
+      // page's vectors when it finds the page missing). Best-effort: a ghost
+      // left in the index is dropped on read.
+      await requestSync(batch.map((item) => ({ spaceId, pageId: idOf(item.sk) })));
     }
 
     await table.delete({ pk: spacePk(spaceId), sk: META });
     await submitReclaim(reclaiming);
-    await requestReingest();
-    // The corpus prefix is empty now, so this rebuild removes the space's
-    // keyword index file rather than writing one.
-    await requestKeywordIndex(spaceId);
     return { spaceId };
   },
 

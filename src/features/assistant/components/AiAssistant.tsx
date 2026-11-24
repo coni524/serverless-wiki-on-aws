@@ -157,7 +157,12 @@ export function useAssistant({
       },
       subscribe: async (channelId, handler) => {
         const channel = await api.getAssistantChannel(channelId);
-        return channel.subscribe(handler);
+        // The hook passes either a bare chunk handler or an options object that
+        // also carries the reconnect callbacks; the channel takes each through
+        // its own overload.
+        return typeof handler === 'function'
+          ? channel.subscribe(handler)
+          : channel.subscribe(handler);
       },
       onMessagesChange: (list) => setMessages(withoutDiscardedReplies([...list])),
       onLoadingChange: setLoading,

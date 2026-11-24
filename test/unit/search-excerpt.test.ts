@@ -1,7 +1,7 @@
 /**
  * Unit tests for the excerpt builder: phrase extraction, the normalization
  * map back into the original text, window placement, and highlight offsets.
- * The corpus read around it is thin I/O, exercised through the dev server.
+ * The index read around it is thin I/O, exercised through the dev server.
  *
  * Run with: pnpm run test:unit
  */
@@ -27,9 +27,8 @@ test('duplicate phrases collapse and punctuation separates runs', () => {
   assert.deepEqual(queryPhrases('aws、aws'), ['aws']);
 });
 
-test('a single non-ASCII character is no phrase, matching the tokenizer', () => {
-  // `tokenize` cannot make a bigram of it, so it never took part in the match.
-  assert.deepEqual(queryPhrases('あ 東京'), ['東京']);
+test('a single character is a phrase, since the analyzer can match it', () => {
+  assert.deepEqual(queryPhrases('猫 東京'), ['猫', '東京']);
   assert.deepEqual(queryPhrases('a'), ['a']);
 });
 
@@ -80,9 +79,8 @@ test('no phrase found falls back to the head of the text with no highlights', ()
   assert.ok(snippet.startsWith('関係のない'));
 });
 
-test('a single non-ASCII query character neither steals the window nor bolds', () => {
-  const text = `あ${'い'.repeat(300)}東京タワーの案内`;
-  assert.deepEqual(emphasized(text, 'あ 東京タワー'), ['東京タワー']);
+test('a single-character query is emboldened where it occurs', () => {
+  assert.deepEqual(emphasized('ネコ（猫）は食肉目', '猫'), ['猫']);
 });
 
 test('overlapping phrase occurrences merge into one range', () => {

@@ -14,10 +14,7 @@
  * function below re-checks the space it is about to touch, so no caller can skip
  * the check by holding an `Access`.
  */
-import { KnowledgeBaseErrors } from '@aws-blocks/blocks';
-import { isBlocksError } from '@aws-blocks/core';
-
-import { search, table } from './resources.js';
+import { table } from './resources.js';
 import {
   MAX_DEPTH,
   META,
@@ -51,8 +48,7 @@ import {
   subtreeHeight,
   writeBody,
 } from './pages.js';
-import { searchKeyword, suggestKeyword } from './keyword-index.js';
-import { indexPage, normalizeForCorpus, readCorpusDocument, unindexPages } from './search-corpus.js';
+import { queryIndex, requestSync } from './search-index.js';
 import { excerptOf } from './search-excerpt.js';
 import { type Viewing } from './viewing.js';
 import {
@@ -121,117 +117,71 @@ async function requireSpaceExists(spaceId: string): Promise<Item> {
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────────
-// The KnowledgeBase returns document chunks; these turn them back into pages.
-
-/** A single search hit reduced to the page it belongs to and where it came from. */
-type SearchHitLocation = { spaceId: string; pageId: string };
+// One query to the S3 Vectors index answers both the meaning and the words
+// (see `search-index.ts`); these turn its hits into the pages a caller may read.
 
 /**
- * Recover the space and page a retrieved chunk belongs to.
- *
- * The corpus stores one document per page at `<spaceId>/<pageId>.md`, so both ids
- * are in the chunk's own source path, and the space id is also the `folder`
- * metadata the block derives from the top-level subfolder. `folder` is preferred
- * for the space (it is what the pre-filter matched on); the path is the fallback.
- * A chunk that fits neither shape is dropped rather than guessed at.
- */
-function locateHit(hit: { source?: string; metadata?: Record<string, string> }): SearchHitLocation | null {
-  const parts = (hit.source ?? '').split('/').filter((segment) => segment !== '');
-  const base = parts.at(-1) ?? '';
-  const pageId = base.endsWith('.md') ? base.slice(0, -3) : '';
-  const spaceId = hit.metadata?.folder ?? parts.at(-2) ?? '';
-  if (spaceId === '' || pageId === '') return null;
-  return { spaceId, pageId };
-}
-
-/**
- * Hits scoring below this are treated as noise, not matches.
- *
- * Vector search always returns the nearest chunks, so an off-topic query
- * ("ramen" against an infrastructure wiki) still yields hits — they just
- * score low. Measured against the prod corpus (2026-07): off-topic queries top
- * out at 0.56 while genuine matches start at 0.64, so 0.6 sits in the gap.
- * Re-measure if the corpus grows enough to shift the distribution.
- */
-const MIN_SEARCH_SCORE = 0.6;
-
-/** A short, single-line excerpt of a chunk for the result list. */
-function snippetOf(text: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
-}
-
-/**
- * Query the knowledge base, treating a not-yet-ready index as "no matches".
- *
- * Right after a deploy, before the first ingestion completes, the block is not
- * ready and `retrieve()` reports it. Search is an auxiliary feature, so this
- * degrades to an empty result set rather than failing the request; the index
- * catches up within minutes.
- */
-async function retrieveSearch(
-  query: string,
-  options: { maxResults: number; filter?: { folder: { equals: string } } },
-) {
-  try {
-    return await search.retrieve(query, {
-      maxResults: options.maxResults,
-      ...(options.filter === undefined ? {} : { filter: options.filter }),
-    });
-  } catch (error: unknown) {
-    if (isBlocksError(error, KnowledgeBaseErrors.NotReady)) return [];
-    throw error;
-  }
-}
-
-/**
- * How strongly a rank counts in the fusion: `1 / (RRF_K + rank)`.
- *
- * 60 is the constant the method's original evaluation settled on and the value
- * virtually every implementation uses. It flattens the curve enough that a
- * document ranked well by *both* searches beats one ranked first by only one.
- */
-const RRF_K = 60;
-
-/**
- * The spaces whose keyword indexes a request is allowed to open.
+ * The spaces a search is narrowed to, or `undefined` for every space.
  *
  * With a space named, that space alone, and only after `read` on it is
- * required. Without one, every space the caller reaches — a global
- * administrator's permission map is empty, so their space list is fetched.
- * This narrows what is opened; `filterReadable` on the result set is still
- * what authorizes what comes back.
+ * required. Without one, the spaces the caller holds a grant on — or every
+ * space for a global administrator, who reaches them all. This narrows the
+ * search; `filterReadable` on the result set is still what authorizes what
+ * comes back.
  */
-async function indexableSpaces(access: Access, spaceId?: string): Promise<string[]> {
+function searchScope(access: Access, spaceId?: string): string[] | undefined {
   if (spaceId !== undefined) {
     requireSpace(access, spaceId, 'read');
     return [spaceId];
   }
-  return access.isGlobalAdmin
-    ? (await readableSpaces(access)).map((item) => idOf(item.pk))
-    : [...access.spaces.keys()];
+  return access.isGlobalAdmin ? undefined : [...access.spaces.keys()];
 }
 
 /**
- * Search over page text — semantic and keyword, fused into one ranking.
+ * Keep the hits the caller may read and whose page still exists, attach the
+ * live title and the space name, and cut to `limit`.
  *
- * Two searches run over the same corpus: the KnowledgeBase's embedding
- * retrieval, and the per-space inverted index (`keyword-index.ts`). Each
- * produces its own ranking, and Reciprocal Rank Fusion adds them into one —
- * so a page found only by literal terms (an identifier, a product name) and a
- * page found only by meaning both surface in the same list. The returned
- * `score` is the fused RRF value, not either search's own scale.
+ * `filterReadable` is the single permission gate for a multi-space result set —
+ * the index's space filter is only a narrowing. A hit whose page was deleted
+ * but whose vectors are not yet removed is dropped here.
+ */
+async function toPages<T extends { spaceId: string; pageId: string }>(
+  access: Access,
+  hits: T[],
+  limit: number,
+) {
+  const readable = filterReadable(access, hits);
+  const metas = await table.getBatch(
+    readable.map((hit) => ({ pk: spacePk(hit.spaceId), sk: pageSk(hit.pageId) })),
+  );
+  const pages = readable
+    .map((hit, index) => ({ hit, meta: metas[index] }))
+    .filter((row) => row.meta !== null && row.meta !== undefined && row.meta.type === 'PAGE')
+    .slice(0, limit);
+
+  const spaceIds = [...new Set(pages.map((row) => row.hit.spaceId))];
+  const spaceMetas = await table.getBatch(spaceIds.map((id) => ({ pk: spacePk(id), sk: META })));
+  const names = new Map<string, string>();
+  spaceIds.forEach((id, index) => names.set(id, spaceMetas[index]?.name ?? ''));
+
+  return pages.map((row) => ({
+    hit: row.hit,
+    meta: row.meta!,
+    spaceName: names.get(row.hit.spaceId) ?? '',
+  }));
+}
+
+/**
+ * Search over page text — by meaning and by words, in one ranking.
  *
- * With `spaceId`, the search is confined to one space: the caller must hold
- * `read` on it, the block pre-filters on the `folder` metadata, and only that
- * space's keyword index is opened. Without it, the semantic search spans every
- * space and the keyword search opens the indexes of the readable spaces only.
- *
- * The pre-filters are a narrowing, not the authorization. Every hit — single
- * space or cross-space — passes through `filterReadable` before it is returned,
- * which is the one place a search result is allowed to be gated. Ranking and
- * snippets never leak a page the caller cannot read, and that holds for the
- * assistant's `searchWiki` tool because it comes through here too.
+ * The index runs both searches and fuses them into one ranking, which the
+ * returned order follows. No score is returned: the fused value follows from
+ * the rank alone and no caller needs it. With `spaceId`, the search is
+ * confined to one space: the caller
+ * must hold `read` on it. Without it, the search is narrowed to the caller's
+ * spaces (see `searchScope`). Every hit passes through
+ * `filterReadable` before it is returned, which holds for the assistant's and
+ * the MCP server's search tools too, because they come through here.
  */
 export async function searchPages(
   access: Access,
@@ -242,138 +192,41 @@ export async function searchPages(
   if (q === '') return { items: [] };
   const limit = Math.max(1, Math.min(50, Math.floor(options?.limit ?? 10)));
 
-  const keywordSpaceIds = await indexableSpaces(access, options?.spaceId);
-  const filter =
-    options?.spaceId === undefined ? undefined : { folder: { equals: options.spaceId } };
+  const spaceIds = searchScope(access, options?.spaceId);
+  // Over-fetch: chunks collapse to pages and the permission gate thins them.
+  const hits = await queryIndex(q, {
+    ...(spaceIds === undefined ? {} : { spaceIds }),
+    topK: Math.min(100, limit * 4),
+    vector: true,
+  });
 
-  // Over-fetch: chunks collapse to pages and then a permission filter thins
-  // them, so more chunks than `limit` may be needed to fill the page.
-  const fetchCount = Math.min(100, limit * 4);
-  const [hits, keywordHits] = await Promise.all([
-    retrieveSearch(q, { maxResults: fetchCount, filter }),
-    searchKeyword(keywordSpaceIds, q, fetchCount),
-  ]);
-
-  // One page per hit set, keeping the best-scoring chunk as the snippet.
-  const byPage = new Map<
-    string,
-    { spaceId: string; pageId: string; score: number; snippet: string }
-  >();
-  for (const hit of hits) {
-    if (hit.score < MIN_SEARCH_SCORE) continue;
-    const located = locateHit(hit);
-    if (located === null) continue;
-    const current = byPage.get(located.pageId);
-    if (current === undefined || hit.score > current.score) {
-      byPage.set(located.pageId, {
-        spaceId: located.spaceId,
-        pageId: located.pageId,
-        score: hit.score,
-        snippet: snippetOf(hit.text),
-      });
-    }
-  }
-  const semanticRanked = [...byPage.values()].sort((a, b) => b.score - a.score);
-
-  // Fuse the two rankings. A keyword hit's snippet is filled in after the
-  // final trim, by reading the page's corpus text — see the excerpt step
-  // below; carrying one through the fusion would build excerpts for rows the
-  // permission gate or the trim then discards.
-  const fused = new Map<string, { spaceId: string; pageId: string; score: number; snippet: string }>();
-  const feed = (ranking: { spaceId: string; pageId: string; snippet?: string }[]) => {
-    ranking.forEach((hit, rank) => {
-      const key = `${hit.spaceId}/${hit.pageId}`;
-      const row = fused.get(key) ?? {
-        spaceId: hit.spaceId,
-        pageId: hit.pageId,
-        score: 0,
-        snippet: '',
-      };
-      row.score += 1 / (RRF_K + rank + 1);
-      if (row.snippet === '' && hit.snippet !== undefined) row.snippet = hit.snippet;
-      fused.set(key, row);
-    });
-  };
-  feed(semanticRanked);
-  feed(keywordHits);
-
-  // The single permission gate for a multi-space result set.
-  const readable = filterReadable(access, [...fused.values()]);
-
-  // Confirm each page still exists and attach its live title. A hit whose page
-  // was deleted but whose vector has not yet been re-ingested is dropped here.
-  const metas = await table.getBatch(
-    readable.map((hit) => ({ pk: spacePk(hit.spaceId), sk: pageSk(hit.pageId) })),
-  );
-  const pages = readable
-    .map((hit, index) => ({ hit, meta: metas[index] }))
-    .filter((row) => row.meta !== null && row.meta.type === 'PAGE')
-    .map((row) => ({
-      pageId: row.hit.pageId,
-      spaceId: row.hit.spaceId,
-      title: row.meta?.title ?? '',
-      snippet: row.hit.snippet,
-      score: row.hit.score,
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-
-  // Excerpts for the keyword hits: read each hit page's corpus text and cut
-  // it around the matched terms, with the ranges reported for the UI to
-  // embolden. Only the trimmed page of results is read (the index holds term
-  // frequencies, not positions, so the text itself is the only source of an
-  // excerpt), and only rows the keyword search matched
-  // — a semantic-only row keeps its best chunk as the snippet. A corpus that
-  // cannot be read, or one where no phrase is found whole (the bigram AND can
-  // pass on terms scattered through the page), keeps whatever snippet the row
-  // already had; the head-of-page fallback fills in only when there is none.
-  const keywordPages = new Set(keywordHits.map((hit) => `${hit.spaceId}/${hit.pageId}`));
-  const excerpted = await Promise.all(
-    pages.map(async (page) => {
-      const bare = { ...page, highlights: [] as [number, number][] };
-      if (!keywordPages.has(`${page.spaceId}/${page.pageId}`)) return bare;
-      try {
-        const text = await readCorpusDocument(page.spaceId, page.pageId);
-        if (text === null) return bare;
-        // The corpus leads with the title as `# <title>` (see
-        // `normalizeForCorpus`); the marker would read as noise in an excerpt,
-        // the title itself is fine — a hit on it is worth showing.
-        const excerpt = excerptOf(text.replace(/^# /, ''), q);
-        if (excerpt.highlights.length === 0 && page.snippet !== '') return bare;
-        return { ...page, snippet: excerpt.snippet, highlights: excerpt.highlights };
-      } catch {
-        return bare; // The excerpt is decoration; a read failure must not fail the search.
-      }
-    }),
-  );
-
-  // Attach each result's space name, so a cross-space list renders without a
-  // second request. Only for the trimmed page of results, and only for spaces
-  // that already passed the permission gate above.
-  const spaceIds = [...new Set(excerpted.map((page) => page.spaceId))];
-  const spaceMetas = await table.getBatch(spaceIds.map((id) => ({ pk: spacePk(id), sk: META })));
-  const names = new Map<string, string>();
-  spaceIds.forEach((id, index) => names.set(id, spaceMetas[index]?.name ?? ''));
-
+  const pages = await toPages(access, hits, limit);
   return {
-    items: excerpted.map((page) => ({ ...page, spaceName: names.get(page.spaceId) ?? '' })),
+    items: pages.map(({ hit, meta, spaceName }) => {
+      // The excerpt is cut around the query's words when the full-text search
+      // matched, so the screen can embolden them; otherwise it is the head of
+      // the matching chunk.
+      const excerpt = excerptOf(hit.text, q);
+      const useExcerpt = hit.matchedText && excerpt.highlights.length > 0;
+      return {
+        pageId: hit.pageId,
+        spaceId: hit.spaceId,
+        spaceName,
+        title: meta.title ?? '',
+        snippet: useExcerpt ? excerpt.snippet : excerptOf(hit.text, '').snippet,
+        highlights: useExcerpt ? excerpt.highlights : [],
+      };
+    }),
   };
 }
 
 /**
  * Suggestions for a query still being typed.
  *
- * Deliberately not the same work as `searchPages`: only the two searches that
- * answer out of the handler's own memory (title prefixes and the inverted
- * index) run here, because this is called on keystrokes. The semantic search,
- * the fusion, and the excerpts belong to the search the user commits to.
- *
- * A one-character query reaches this and nothing else: it makes no bigram, so
- * the inverted index cannot see it, but a title prefix can.
- *
- * The permission story is `searchPages`': only readable spaces' indexes are
- * opened, and `filterReadable` gates the result set regardless. Titles are
- * read live from the table, never taken from the index's stale copy.
+ * The full-text search alone: no embedding means no Bedrock call, which keeps
+ * this cheap enough for every keystroke. It matches whole words, so a word
+ * still being typed suggests nothing until it is complete. Same permission
+ * gate as `searchPages`.
  */
 export async function suggestPages(
   access: Access,
@@ -384,37 +237,22 @@ export async function suggestPages(
   if (q === '') return { items: [] };
   const limit = Math.max(1, Math.min(20, Math.floor(options?.limit ?? 7)));
 
-  const spaceIds = await indexableSpaces(access, options?.spaceId);
-  // Over-fetch: deleted pages and spaces that lost their grant since the index
-  // was built are dropped below, and the dropdown should still fill.
-  const hits = await suggestKeyword(spaceIds, q, limit * 2);
+  const spaceIds = searchScope(access, options?.spaceId);
+  const hits = await queryIndex(q, {
+    ...(spaceIds === undefined ? {} : { spaceIds }),
+    topK: limit * 4,
+    vector: false,
+  });
 
-  // The single permission gate, exactly as on the search path.
-  const readable = filterReadable(access, hits);
-
-  const metas = await table.getBatch(
-    readable.map((hit) => ({ pk: spacePk(hit.spaceId), sk: pageSk(hit.pageId) })),
-  );
-  const pages = readable
-    .map((hit, index) => ({ hit, meta: metas[index] }))
-    .filter((row) => row.meta !== null && row.meta.type === 'PAGE')
-    .map((row) => ({
-      pageId: row.hit.pageId,
-      spaceId: row.hit.spaceId,
-      title: row.meta?.title ?? '',
-      kind: row.meta?.kind ?? 'page',
-    }))
-    .slice(0, limit);
-
-  const uniqueSpaceIds = [...new Set(pages.map((page) => page.spaceId))];
-  const spaceMetas = await table.getBatch(
-    uniqueSpaceIds.map((id) => ({ pk: spacePk(id), sk: META })),
-  );
-  const names = new Map<string, string>();
-  uniqueSpaceIds.forEach((id, index) => names.set(id, spaceMetas[index]?.name ?? ''));
-
+  const pages = await toPages(access, hits, limit);
   return {
-    items: pages.map((page) => ({ ...page, spaceName: names.get(page.spaceId) ?? '' })),
+    items: pages.map(({ hit, meta, spaceName }) => ({
+      pageId: hit.pageId,
+      spaceId: hit.spaceId,
+      title: meta.title ?? '',
+      kind: meta.kind ?? 'page',
+      spaceName,
+    })),
   };
 }
 
@@ -762,8 +600,8 @@ export async function createPage(
   });
 
   // Feed the page to search. Best-effort: the page is already persisted, and a
-  // derived index must not fail the save (see `indexPage`).
-  await indexPage(input.spaceId, pageId, normalizeForCorpus(title, body));
+  // derived index must not fail the save (see `requestSync`).
+  await requestSync([{ spaceId: input.spaceId, pageId }]);
 
   return { pageId, spaceId: input.spaceId, revision: 1 };
 }
@@ -822,12 +660,9 @@ export async function updatePage(
     updatedBy: access.user.userSub,
   });
 
-  // Re-index with the page as it now stands. The corpus document is title plus
-  // body, so a rename changes it as much as a body edit does; when only the
-  // title moved, the current body is read back to rebuild the document.
-  // Best-effort — see `indexPage`.
-  const bodyText = patch.body === undefined ? await readBody(page.bodyKey) : patch.body;
-  await indexPage(spaceId, pageId, normalizeForCorpus(title, bodyText));
+  // Re-index: a rename changes the indexed text as much as a body edit does.
+  // Best-effort — see `requestSync`.
+  await requestSync([{ spaceId, pageId }]);
 
   return { pageId, title, revision, updatedAt };
 }
@@ -1037,10 +872,10 @@ export async function deleteFolder(
 /**
  * The delete both kinds share.
  *
- * Only the pages among the doomed nodes reach S3 and the search corpus. A folder
+ * Only the pages among the doomed nodes reach S3 and the search index. A folder
  * never wrote either, so promising to reclaim its prefix would file a cleanup
- * record against an empty sweep, and unindexing it would name a corpus document
- * that was never written.
+ * record against an empty sweep, and unindexing it would name vectors that were
+ * never written.
  */
 async function deleteNode(
   access: Access,
@@ -1099,15 +934,14 @@ async function deleteNode(
     doomedPages.map((item) => pageReclaimPrefix(spaceId, idOf(item.sk))),
   );
 
-  // Drop the deleted pages from search before their metadata goes — the same
-  // order `deleteSpace` uses, so a failure cannot orphan a corpus document
-  // behind a page id that no longer resolves. Reparented children keep theirs;
-  // their text did not change. Bounded by the cascade cap, so this stays a
-  // single batched delete rather than an unbounded sweep. Best-effort.
-  await unindexPages(doomedPages.map((item) => ({ spaceId, pageId: idOf(item.sk) })));
-
   await deletePageRecords(doomed);
   await submitReclaim(reclaiming);
+
+  // Drop the deleted pages from search. After the records are gone, because the
+  // job reads the page as it stands and removes its vectors only when it finds
+  // the page missing. Reparented children keep theirs; their text did not
+  // change. Best-effort.
+  await requestSync(doomedPages.map((item) => ({ spaceId, pageId: idOf(item.sk) })));
 
   return { pageId: nodeId, deleted: doomed.length };
 }
