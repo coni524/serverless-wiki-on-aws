@@ -117,6 +117,14 @@ class SpacePush {
     // refusal per page, and `listSpaces` already said so.
     if (space.permission === 'read') return false;
 
+    // Only the folder this plugin recorded for the space is ever read. The
+    // caller moves it to the space's current name before calling, so the two
+    // agree; a folder that merely has the right name is not the space's.
+    if (folder !== known.folder) {
+      report.failures.push(t.pushFolderNotRecorded(space.name, folder));
+      return false;
+    }
+
     const root = this.app.vault.getAbstractFileByPath(folder);
     if (!(root instanceof TFolder)) {
       // Nothing to send from a folder that is not there — which is ordinary on

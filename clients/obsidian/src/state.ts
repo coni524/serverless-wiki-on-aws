@@ -4,10 +4,11 @@
  *
  * It lives next to the settings, at
  * `<vault>/.obsidian/plugins/slwiki-sync/sync-state.json`, but not inside them.
- * `data.json` holds the refresh token and is rewritten by `saveSettings()`;
- * this file is rewritten at the end of every sync cycle and grows with the
- * number of pages. Keeping them apart means a sync cycle never rewrites the
- * tokens, and a corrupt state file never costs the user their sign-in.
+ * `data.json` is rewritten by `saveSettings()` (and holds the refresh token on
+ * an Obsidian without secret storage); this file is rewritten at the end of
+ * every sync cycle and grows with the number of pages. Keeping them apart means
+ * a sync cycle never rewrites the settings, and a corrupt state file never
+ * costs the user their sign-in.
  *
  * Losing this file is recoverable by design:
  * with no record of what was written, every page looks new and the next cycle
@@ -93,6 +94,18 @@ export type SpaceState = {
   folder: string;
   pages: Record<string, PageState>;
   folders: Record<string, FolderState>;
+  /**
+   * Whether the notes written for this space have been checked for picture
+   * links the Wiki's text could not have meant.
+   *
+   * An earlier version let some of those through (`disarm` in
+   * `attachments.ts`), and a note it wrote keeps them until the Wiki's copy
+   * changes — which may be never. A record without this is from that version,
+   * and its notes are checked once before anything is sent (`sync.ts`). A
+   * record created now starts with it set, since everything written into it
+   * from here on is checked as it is written.
+   */
+  linksChecked?: true;
 };
 
 type SyncState = {
@@ -216,11 +229,16 @@ export class SyncStateStore {
     await this.adapter.write(this.path, JSON.stringify(this.state, null, 2));
   }
 
+  /** The record for a space, or undefined when there is none yet. */
+  get(spaceId: string): SpaceState | undefined {
+    return this.state.spaces[spaceId];
+  }
+
   /** The record for a space, created on first use with the folder it is given. */
   forSpace(spaceId: string, folder: string): SpaceState {
     const existing = this.state.spaces[spaceId];
     if (existing !== undefined) return existing;
-    const created: SpaceState = { folder, pages: {}, folders: {} };
+    const created: SpaceState = { folder, pages: {}, folders: {}, linksChecked: true };
     this.state.spaces[spaceId] = created;
     return created;
   }

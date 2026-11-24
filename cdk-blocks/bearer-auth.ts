@@ -25,10 +25,24 @@
  */
 import { ApiError, type BlocksContext } from '@aws-cdk-blocks/core';
 import { getRequestBaseUrl } from '@aws-cdk-blocks/core/bb-utils';
+import {
+  AdminGetUserCommand,
+  CognitoIdentityProviderClient,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 
 import { type Access, accessForUser, requireAccess } from './access.js';
 import { DEPLOYED } from './deployed.js';
+import {
+  NoAccessError,
+  SyncBusyError,
+  directRoleGroups,
+  groupsFromClaims,
+  hasEffectivePermission,
+  providerForRegistration,
+  syncIdpGroups,
+} from './federation.js';
+import type { Item } from './model.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 // Written into the Lambda's environment by `index.cdk.ts`, which is also what
@@ -213,7 +227,7 @@ export async function authenticate(
   const bearer = /^Bearer[ \t]+(\S+)$/i.exec(header.trim());
   if (bearer === null) throw unauthorized(metadataUrl, 'A bearer access token is required');
 
-  let payload: { sub?: unknown; scope?: unknown };
+  let payload: { sub?: unknown; scope?: unknown; auth_time?: unknown; username?: unknown };
   try {
     payload = await verifier.verify(bearer[1] ?? '');
   } catch {
@@ -229,22 +243,220 @@ export async function authenticate(
   );
   if (!scopes.has(SCOPE_READ)) throw insufficientScope(metadataUrl, SCOPE_READ);
 
+  const token: TokenFacts = {
+    sub: String(payload.sub ?? ''),
+    authTime: typeof payload.auth_time === 'number' ? payload.auth_time : undefined,
+    username: typeof payload.username === 'string' ? payload.username : '',
+  };
+
   try {
-    return { access: await accessForUser(String(payload.sub ?? '')), scopes };
+    const access = await accessForUser(token.sub, (own, profile) =>
+      federatedGate({ own, profile, token, metadataUrl }),
+    );
+    return { access, scopes };
   } catch (error: unknown) {
-    // The one refusal here that is not about the token at all: a Cognito
-    // account that has never signed in to the Wiki has no directory record, so
-    // there is nothing to resolve permissions from. Rephrased rather than
-    // relayed, because "Unknown user" reads like a fault and the fix — sign in
-    // to the Wiki once — is not something the reader would guess.
-    if (error instanceof ApiError && error.status === 403) {
-      throw new Refusal(403, {
-        error: 'access_denied',
-        error_description:
-          'This account is not known to the Wiki yet. Sign in to the Wiki once in a browser, then retry.',
-      });
+    throw asRefusal(error);
+  }
+}
+
+/** Turn what the permission layers throw into the refusal a client reads. */
+function asRefusal(error: unknown): unknown {
+  if (error instanceof Refusal) return error;
+  if (error instanceof NoAccessError) {
+    return new Refusal(403, { error: 'access_denied', error_description: error.message });
+  }
+  if (error instanceof SyncBusyError) return temporarilyUnavailable(error.message);
+  // The one refusal here that is not about the token at all: a Cognito
+  // account that has never signed in to the Wiki has no directory record, so
+  // there is nothing to resolve permissions from. Rephrased rather than
+  // relayed, because "Unknown user" reads like a fault and the fix — sign in
+  // to the Wiki once — is not something the reader would guess.
+  if (error instanceof ApiError && error.status === 403) {
+    return new Refusal(403, {
+      error: 'access_denied',
+      error_description:
+        'This account is not known to the Wiki yet. Sign in to the Wiki once in a browser, then retry.',
+    });
+  }
+  return error;
+}
+
+function temporarilyUnavailable(description: string): Refusal {
+  return new Refusal(
+    503,
+    { error: 'temporarily_unavailable', error_description: description },
+    { 'Retry-After': '5' },
+  );
+}
+
+// ─── Federated accounts ──────────────────────────────────────────────────────
+//
+// A federated account's permissions come from its IdP's groups, which the
+// pool copies into `custom:groups` each time the account signs in — through
+// the browser or through the hosted sign-in an MCP client or the sync plugin
+// uses. The browser door applies them in its sign-in hook. Nothing else would,
+// so this door applies them too: once per sign-in, when the token's
+// `auth_time` is newer than the sign-in last applied.
+//
+// Two further rules hold here and nowhere else. A federated token is only
+// accepted for a limited time after its sign-in, because a refresh does not go
+// back to the IdP — without the limit, a person removed from a group there
+// could go on refreshing for the full life of the refresh token. And an account
+// left with no permission is refused on every request, which this door can do
+// at no cost because it reads the account's edges on every request anyway.
+
+/**
+ * How long after its sign-in a federated account's token is accepted, in
+ * seconds. Past it the client is sent back to the hosted sign-in, which asks
+ * the IdP again and moves `auth_time`. Password accounts are not limited: the
+ * Wiki itself is where their permissions are decided.
+ */
+export const FEDERATED_SIGN_IN_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
+
+/** What the gate needs from a verified access token. */
+export type TokenFacts = { sub: string; authTime: number | undefined; username: string };
+
+/** What `AdminGetUser` says about a pool user, reduced to what is checked. */
+export type PoolUser = {
+  sub: string | undefined;
+  enabled: boolean;
+  groups: string | undefined;
+  identities: string | undefined;
+};
+
+/** The gate's outside world, so tests can stand in for Cognito and the table. */
+export type GateDeps = {
+  readPoolUser: (username: string) => Promise<PoolUser>;
+  providerFor: (registration: string) => string | undefined;
+  sync: typeof syncIdpGroups;
+  nowMs: () => number;
+};
+
+let cognito: CognitoIdentityProviderClient | undefined;
+
+async function readPoolUser(username: string): Promise<PoolUser> {
+  // Bounded so a slow pool fails the request well inside the synchronisation
+  // budget in `federation.ts`, rather than holding the lease past it.
+  cognito ??= new CognitoIdentityProviderClient({
+    maxAttempts: 2,
+    requestHandler: { connectionTimeout: 2000, requestTimeout: 4000 },
+  });
+  const result = await cognito.send(
+    new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }),
+  );
+  const attribute = (name: string) =>
+    result.UserAttributes?.find((entry) => entry.Name === name)?.Value;
+  return {
+    sub: attribute('sub'),
+    enabled: result.Enabled !== false,
+    groups: attribute('custom:groups'),
+    identities: attribute('identities'),
+  };
+}
+
+const defaultDeps: GateDeps = {
+  readPoolUser,
+  providerFor: providerForRegistration,
+  sync: syncIdpGroups,
+  nowMs: () => Date.now(),
+};
+
+/**
+ * The bearer door's check on a federated account, run between hop 1 and the
+ * rest of the permission walk (see `AccessGate` in `access.ts`).
+ *
+ * Password accounts pass untouched. A federated account is refused when its
+ * sign-in is too old, has its role groups brought up to date when its sign-in
+ * is newer than the one last applied, and is refused when it is left with no
+ * permission. Returns the partition when the edges changed.
+ */
+export async function federatedGate(
+  input: { own: Item[]; profile: Item; token: TokenFacts; metadataUrl: string },
+  deps: GateDeps = defaultDeps,
+): Promise<Item[] | undefined> {
+  const { profile, token, metadataUrl } = input;
+  const provider = profile.identityProvider;
+  if (provider === undefined) return undefined;
+
+  const { authTime } = token;
+  if (
+    authTime === undefined ||
+    deps.nowMs() / 1000 - authTime > FEDERATED_SIGN_IN_MAX_AGE_SECONDS
+  ) {
+    throw unauthorized(metadataUrl, 'The sign-in behind this token is too old. Sign in again');
+  }
+
+  let own = input.own;
+  let replaced: Item[] | undefined;
+  const record = own.find((item) => item.type === 'IDP_SYNC');
+  if (authTime > (record?.syncedAuthTime ?? 0)) {
+    const result = await deps.sync({
+      userId: token.sub,
+      authTime,
+      load: () => groupsFromPool(token, provider, deps),
+    });
+    // An applied synchronisation has already refused an account it left with
+    // nothing, so only the other outcome is checked below.
+    if (result.applied) return result.changed ? result.own : undefined;
+    // Somebody else applied a sign-in at least as new while this request was
+    // on its way; their result is what stands.
+    own = result.own;
+    replaced = result.own;
+  }
+
+  if (!hasEffectivePermission(own, directRoleGroups(own))) throw new NoAccessError();
+  return replaced;
+}
+
+/**
+ * The account's IdP groups as the pool holds them now, after checking that the
+ * pool user is the token's and belongs to the IdP the directory says.
+ *
+ * Any doubt is a refusal rather than a pass on the edges already held: a
+ * request let through on old edges is exactly what this door exists to stop.
+ */
+async function groupsFromPool(
+  token: TokenFacts,
+  provider: string,
+  deps: GateDeps,
+): Promise<{ provider: string; groups: string[] }> {
+  let user: PoolUser;
+  try {
+    user = await deps.readPoolUser(token.username);
+  } catch (error: unknown) {
+    // Gone from the pool is not worth retrying: the account was deleted there.
+    if (error instanceof Error && error.name === 'UserNotFoundException') {
+      throw new Refusal(401, { error: 'invalid_token', error_description: 'This account no longer exists' });
     }
-    throw error;
+    console.error('[sl-wiki] Could not read a federated account from the user pool.', error);
+    throw temporarilyUnavailable('The Wiki could not check this account. Retry shortly.');
+  }
+  if (!user.enabled) throw new Refusal(401, { error: 'invalid_token', error_description: 'This account is disabled' });
+  if (user.sub !== token.sub || !registrationsOf(user.identities).some((name) => deps.providerFor(name) === provider)) {
+    console.error('[sl-wiki] A federated token does not match its pool user.', {
+      sub: token.sub,
+      provider,
+    });
+    throw temporarilyUnavailable('The Wiki could not check this account. Retry shortly.');
+  }
+  return { provider, groups: groupsFromClaims({ groups: user.groups }, 'groups') };
+}
+
+/** The IdP registration names a pool user's `identities` attribute lists. */
+export function registrationsOf(identities: string | undefined): string[] {
+  if (identities === undefined) return [];
+  try {
+    const parsed: unknown = JSON.parse(identities);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry: unknown) =>
+        typeof entry === 'object' && entry !== null
+          ? (entry as { providerName?: unknown }).providerName
+          : undefined,
+      )
+      .filter((name): name is string => typeof name === 'string');
+  } catch {
+    return [];
   }
 }
 

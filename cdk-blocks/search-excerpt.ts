@@ -3,9 +3,10 @@
  * with the matched ranges reported so the UI can embolden them.
  *
  * The search index returns the matching chunk's text but not where in it the
- * words matched, so the excerpt is built here: the caller hands the chunk to
- * `excerptOf` together with the query. Everything in this module is pure
- * string work, which is what makes it unit-testable.
+ * words matched, so the excerpt is built here: the caller splits the query
+ * with `queryPhrases` once per request and hands each chunk to `excerptOf`
+ * together with those phrases. Everything in this module is pure string work,
+ * which is what makes it unit-testable.
  *
  * Matching is NFKC-normalized and lowercased, and keeps each query run whole
  * as a phrase: the excerpt should embolden "東京タワー", not fragments of it.
@@ -116,16 +117,19 @@ function merged(ranges: [number, number][]): [number, number][] {
 const flat = (text: string) => text.replace(/\s+/g, ' ');
 
 /**
- * Build the excerpt of `text` around the first place `query` matches.
+ * Build the excerpt of `text` around the first place one of `phrases` matches.
+ *
+ * `phrases` is what `queryPhrases` returned for the query. It is taken already
+ * split so a search request splits its query once rather than once per hit;
+ * an empty list yields the head of the text.
  *
  * No phrase found — the analyzer matches words, which need not appear in the
  * text exactly as typed — degrades to the head of the text with no highlights,
  * so the caller can tell a real excerpt (`highlights` non-empty) from the
  * fallback.
  */
-export function excerptOf(text: string, query: string): Excerpt {
+export function excerptOf(text: string, phrases: readonly string[]): Excerpt {
   const { norm, map } = normalizedWithMap(text);
-  const phrases = queryPhrases(query);
 
   const found: [number, number][] = [];
   for (const phrase of phrases) {

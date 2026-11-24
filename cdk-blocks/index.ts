@@ -387,7 +387,9 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
    * Search over page text, by meaning and by words in one ranking.
    *
    * The work is in `searchPages`, which the assistant's `searchWiki` tool calls
-   * too — including the `filterReadable` gate every hit passes through.
+   * too — including the `filterReadable` gate every hit passes through. It also
+   * refuses a query that is not a string as invalid input, and cuts a long one
+   * to the 1,024 characters the index accepts, so pasted text still searches.
    */
   async search(query: string, options?: { spaceId?: string; limit?: number }) {
     const access = await requireAccess(context);

@@ -14,6 +14,8 @@
  * function below re-checks the space it is about to touch, so no caller can skip
  * the check by holding an `Access`.
  */
+import { z } from 'zod';
+
 import { keyOf, putItem, table, valuesOf } from './resources.js';
 import {
   MAX_DEPTH,
@@ -48,8 +50,8 @@ import {
   subtreeHeight,
   writeBody,
 } from './pages.js';
-import { queryIndex, requestSync } from './search-index.js';
-import { excerptOf } from './search-excerpt.js';
+import { MAX_QUERY_CHARS, queryIndex, requestSync } from './search-index.js';
+import { excerptOf, queryPhrases } from './search-excerpt.js';
 import { type Viewing } from './viewing.js';
 import {
   type Access,
@@ -172,6 +174,58 @@ async function toPages<T extends { spaceId: string; pageId: string }>(
 }
 
 /**
+ * The search query as a tool takes it: text no longer than the index accepts.
+ *
+ * The MCP server's and the assistant's `searchWiki` tools both declare it, so an
+ * over-long query is refused with a validation error before any work is done,
+ * and the bound shows in the JSON Schema the model reads.
+ */
+export const searchQuerySchema = z.string().max(MAX_QUERY_CHARS);
+
+/**
+ * The query argument of a search call, refused unless it is text.
+ *
+ * The UI's API methods receive their arguments as parsed JSON, so the declared
+ * `string` is not enforced at run time; a number or an object would otherwise
+ * fail on `trim()` as a server error rather than as the caller's mistake.
+ */
+function queryText(query: unknown): string {
+  if (typeof query !== 'string') invalid('The search query must be a string');
+  return query;
+}
+
+/**
+ * How many hits a search call asks for, floored and clamped into `[1, max]`.
+ *
+ * Left out — `undefined`, or the `null` JSON carries for an argument skipped
+ * before a supplied one — it is `fallback`. Anything that is not a finite
+ * number is refused as invalid input: the UI's API methods receive parsed JSON
+ * with no run-time type check, and a string or `NaN` would otherwise survive
+ * the clamp as `NaN` and reach the index as its `topK`.
+ */
+export function hitLimit(limit: unknown, fallback: number, max: number): number {
+  if (limit === undefined || limit === null) return fallback;
+  if (typeof limit !== 'number' || !Number.isFinite(limit)) invalid('limit must be a finite number');
+  return Math.max(1, Math.min(max, Math.floor(limit)));
+}
+
+/**
+ * The query one search request works with, and the phrases its excerpts look for.
+ *
+ * The text is cut to what the index accepts before anything else sees it. The
+ * index would cut it anyway, but the excerpts are built from the query too, and
+ * their cost grows with the query's length on every hit; an uncut query of a
+ * few megabytes can keep the Lambda busy for seconds per request while asking
+ * the index no more than its first 1,024 characters do. Cutting here covers every
+ * caller, since the UI, the assistant and the MCP server all search through
+ * `searchPages`. The phrases are split once here rather than once per hit.
+ */
+export function searchTerms(query: unknown): { text: string; phrases: string[] } {
+  const text = queryText(query).trim().slice(0, MAX_QUERY_CHARS);
+  return { text, phrases: queryPhrases(text) };
+}
+
+/**
  * Search over page text — by meaning and by words, in one ranking.
  *
  * The index runs both searches and fuses them into one ranking, which the
@@ -188,9 +242,9 @@ export async function searchPages(
   query: string,
   options?: { spaceId?: string; limit?: number },
 ) {
-  const q = query.trim();
+  const { text: q, phrases } = searchTerms(query);
   if (q === '') return { items: [] };
-  const limit = Math.max(1, Math.min(50, Math.floor(options?.limit ?? 10)));
+  const limit = hitLimit(options?.limit, 10, 50);
 
   const spaceIds = searchScope(access, options?.spaceId);
   // Over-fetch: chunks collapse to pages and the permission gate thins them.
@@ -206,14 +260,14 @@ export async function searchPages(
       // The excerpt is cut around the query's words when the full-text search
       // matched, so the screen can embolden them; otherwise it is the head of
       // the matching chunk.
-      const excerpt = excerptOf(hit.text, q);
+      const excerpt = excerptOf(hit.text, phrases);
       const useExcerpt = hit.matchedText && excerpt.highlights.length > 0;
       return {
         pageId: hit.pageId,
         spaceId: hit.spaceId,
         spaceName,
         title: meta.title ?? '',
-        snippet: useExcerpt ? excerpt.snippet : excerptOf(hit.text, '').snippet,
+        snippet: useExcerpt ? excerpt.snippet : excerptOf(hit.text, []).snippet,
         highlights: useExcerpt ? excerpt.highlights : [],
       };
     }),
@@ -233,9 +287,10 @@ export async function suggestPages(
   query: string,
   options?: { spaceId?: string; limit?: number },
 ) {
-  const q = query.trim();
+  // Cut the same way `searchPages` cuts; the index would cut it anyway.
+  const q = queryText(query).trim().slice(0, MAX_QUERY_CHARS);
   if (q === '') return { items: [] };
-  const limit = Math.max(1, Math.min(20, Math.floor(options?.limit ?? 7)));
+  const limit = hitLimit(options?.limit, 7, 20);
 
   const spaceIds = searchScope(access, options?.spaceId);
   const hits = await queryIndex(q, {

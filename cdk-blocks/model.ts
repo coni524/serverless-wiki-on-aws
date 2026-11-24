@@ -42,6 +42,7 @@ export const ITEM_TYPES = [
   'PAGE',
   'PAGE_REF',
   'CLEANUP',
+  'IDP_SYNC',
 ] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 
@@ -143,6 +144,16 @@ export const itemSchema = z
     // CLEANUP — the promise that these S3 objects will be reclaimed.
     prefix: z.string().optional(),
 
+    // IDP_SYNC — how far a federated account's role groups have been brought
+    // up to date with its IdP, and who is doing it right now.
+    /** The newest authentication time (seconds) whose groups are written.
+     *  Fractional only where a sign-in carried no time of its own. */
+    syncedAuthTime: z.number().nonnegative().optional(),
+    /** Epoch milliseconds until which one synchroniser holds the record. */
+    leaseUntil: z.number().int().nonnegative().optional(),
+    /** The role groups the last synchronisation left edges to. */
+    roleGroupIds: z.array(z.string().min(1)).max(500).optional(),
+
     createdAt: z.string().optional(),
     addedAt: z.string().optional(),
     addedBy: z.string().optional(),
@@ -184,6 +195,10 @@ export const itemSchema = z
       case 'CLEANUP':
         require('prefix');
         break;
+      case 'IDP_SYNC':
+        require('syncedAuthTime');
+        require('version');
+        break;
       default:
         break;
     }
@@ -208,6 +223,8 @@ export const roleGroupPk = (roleGroupId: string) => `RG#${roleGroupId}`;
 
 export const META = 'META';
 export const PROFILE = 'PROFILE';
+/** The sort key of a federated account's synchronisation record. */
+export const IDP_SYNC = 'IDP_SYNC';
 export const CONFIG_PK = 'CONFIG';
 export const CONFIG_DEFAULTS = 'DEFAULTS';
 /** Sort key of the permission epoch, alongside the other config records. */

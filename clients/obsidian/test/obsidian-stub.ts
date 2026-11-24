@@ -28,9 +28,34 @@ export class TFolder extends TAbstractFile {
   children: TAbstractFile[] = [];
 }
 
-/** Reached only by `api.ts`, which these tests replace outright. */
-export const requestUrl = async (): Promise<never> => {
-  throw new Error('requestUrl is not available in the tests');
+/** What a test sees of one request, and what it answers with. */
+export type StubRequest = {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | ArrayBuffer;
+};
+export type StubResponse = { status: number; text?: string; arrayBuffer?: ArrayBuffer };
+
+/**
+ * The network. Every request is recorded, and answered by `http.handler` when a
+ * test sets one; with none set, a request is a test failure, which is what
+ * the sync cases want — they replace `api.ts` outright.
+ */
+export const http: {
+  handler: ((request: StubRequest) => StubResponse | Promise<StubResponse>) | null;
+  requests: StubRequest[];
+} = { handler: null, requests: [] };
+
+export const requestUrl = async (request: StubRequest) => {
+  http.requests.push(request);
+  if (http.handler === null) throw new Error('requestUrl is not available in the tests');
+  const response = await http.handler(request);
+  return {
+    status: response.status,
+    text: response.text ?? '',
+    arrayBuffer: response.arrayBuffer ?? new ArrayBuffer(0),
+  };
 };
 
 /**

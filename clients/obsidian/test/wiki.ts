@@ -22,6 +22,11 @@ export class FakeWiki {
   private next = 1;
   private clock = 0;
   readonly calls: string[] = [];
+  /** The space's name, which any admin of it can change. */
+  spaceName = 'memo';
+  private uploads = 0;
+  /** Called as a snapshot is taken, for a test to look at what is on disk then. */
+  beforeList: (() => void) | null = null;
 
   private stamp(): string {
     this.clock += 1;
@@ -76,9 +81,10 @@ export class FakeWiki {
     const wiki = this;
     return {
       async listSpaces() {
-        return [{ spaceId: 's1', name: 'memo', description: '', permission: 'write' as const }];
+        return [{ spaceId: 's1', name: wiki.spaceName, description: '', permission: 'write' as const }];
       },
       async listAllNodes() {
+        wiki.beforeList?.();
         return [...wiki.nodes.values()].map((node) => ({
           pageId: node.id,
           kind: node.kind,
@@ -143,6 +149,11 @@ export class FakeWiki {
         wiki.nodes.delete(folderId);
       },
       async listAttachments() { return []; },
+      async createAttachmentUploadUrl(input: { pageId: string; filename: string; contentType: string }) {
+        wiki.calls.push(`upload ${input.filename} to ${input.pageId}`);
+        wiki.uploads += 1;
+        return { attachmentId: `att${wiki.uploads}`, contentType: input.contentType, uploadUrl: 'https://s3.example/put' };
+      },
       async createAttachmentDownloadUrls() { return {}; },
     };
   }

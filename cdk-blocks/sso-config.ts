@@ -65,6 +65,12 @@ export interface RuntimeSsoProvider {
   name: string;
   label: string;
   primary: boolean;
+  /**
+   * The name Cognito registered the IdP under, which is what a pool user's
+   * `identities` attribute names. Absent from a value written before it was
+   * carried, where it equals `name` (the default registration name).
+   */
+  registration?: string;
 }
 
 /** The validated content of `sso.config.json`. */
@@ -270,6 +276,7 @@ export function ssoProvidersJson(entries: SsoIdpEntry[]): string {
         name: entry.providerName,
         label: entry.label,
         primary: entry.primary,
+        registration: entry.registrationName,
       }),
     ),
   );
@@ -299,7 +306,8 @@ export function runtimeSsoProviders(): RuntimeSsoProvider[] {
         entry !== null &&
         typeof (entry as RuntimeSsoProvider).name === 'string' &&
         typeof (entry as RuntimeSsoProvider).label === 'string' &&
-        typeof (entry as RuntimeSsoProvider).primary === 'boolean',
+        typeof (entry as RuntimeSsoProvider).primary === 'boolean' &&
+        ['string', 'undefined'].includes(typeof (entry as RuntimeSsoProvider).registration),
     )
   ) {
     throw new Error('SSO_PROVIDERS is not the list synth writes. Redeploy rather than hand-edit.');

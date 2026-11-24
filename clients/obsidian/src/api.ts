@@ -13,7 +13,7 @@
  */
 import { requestUrl } from 'obsidian';
 
-import { AuthClient } from './auth';
+import { AuthClient, type Credential } from './auth';
 import { t } from './i18n';
 import type { RemoteNode } from './paths';
 import { type SettingsHost, normalizeUrl } from './settings';
@@ -62,26 +62,39 @@ export class SyncApi {
     private readonly auth: AuthClient,
   ) {}
 
+  /**
+   * One request, sent only to the Wiki the token belongs to.
+   *
+   * The address comes with the token (`AuthClient.credential`), not from the
+   * settings, so the two are one pair for the first request and the retry
+   * alike. The auth client has already checked that the settings still name
+   * that Wiki; a retry whose Wiki would differ from the first request's is
+   * refused there rather than sent.
+   */
   async call<T>(method: ExtMethod, args: Record<string, unknown> = {}): Promise<T> {
-    const wikiUrl = normalizeUrl(this.host.settings.wikiUrl);
-    if (wikiUrl === '') throw new SyncApiError(0, t.wikiUrlMissing);
-    const url = `${wikiUrl}/ext/${method}`;
+    if (normalizeUrl(this.host.settings.wikiUrl) === '') {
+      throw new SyncApiError(0, t.wikiUrlMissing);
+    }
 
-    const send = async (token: string) =>
+    const send = async (credential: Credential) =>
       await requestUrl({
-        url,
+        url: `${credential.wikiUrl}/ext/${method}`,
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: {
+          Authorization: `Bearer ${credential.accessToken}`,
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify(args),
         throw: false,
       });
 
-    let response = await send(await this.auth.accessToken());
+    const first = await this.auth.credential();
+    let response = await send(first);
     if (response.status === 401) {
       // The stored token was not the problem this plugin thought it was —
       // revoked, or the clock drifted. One refresh, one retry; a second 401 is
       // reported, because two in a row is not a token that expired.
-      response = await send(await this.auth.refresh());
+      response = await send(await this.auth.refreshFor(first));
     }
 
     if (response.status < 200 || response.status >= 300) {

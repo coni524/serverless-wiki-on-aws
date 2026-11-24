@@ -42,6 +42,7 @@ import {
   deletePage,
   readPageDetail,
   searchPages,
+  searchQuerySchema,
   updatePage,
 } from './wiki-ops.js';
 import { unescapeModelNewlines } from './model-text.js';
@@ -175,7 +176,7 @@ export const assistant = new Agent(scope, 'assistant', {
       description:
         'Search the Wiki pages by meaning and by keyword. Call this first for any question about the contents of the Wiki. Only pages the user is allowed to read come back.',
       parameters: z.object({
-        query: z.string().describe('What to look for, written as a natural-language sentence'),
+        query: searchQuerySchema.describe('What to look for, written as a natural-language sentence'),
         spaceId: z
           .string()
           .optional()

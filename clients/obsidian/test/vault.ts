@@ -19,6 +19,10 @@ export class FakeVault {
     this.byPath.set('/', this.root);
   }
 
+  getRoot(): TFolder {
+    return this.root;
+  }
+
   getAbstractFileByPath(path: string): TAbstractFile | null {
     return this.byPath.get(path) ?? null;
   }
@@ -56,6 +60,18 @@ export class FakeVault {
 
   async read(file: TFile): Promise<string> {
     return this.bodies.get(file.path) ?? '';
+  }
+
+  async readBinary(file: TFile): Promise<ArrayBuffer> {
+    return new TextEncoder().encode(this.bodies.get(file.path) ?? '').buffer as ArrayBuffer;
+  }
+
+  /** Obsidian's lookup of a bare link name: here, any file with that name. */
+  firstByName(name: string): TFile | null {
+    for (const node of this.byPath.values()) {
+      if (node instanceof TFile && (node.path === name || node.path.endsWith(`/${name}`))) return node;
+    }
+    return null;
   }
 
   async modify(file: TFile, body: string): Promise<void> {

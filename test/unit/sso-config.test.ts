@@ -146,9 +146,14 @@ test('the runtime list round-trips through SSO_PROVIDERS', () => {
   const { entries } = parseSsoConfig({ idps: [{ ...entra, label: 'Contoso' }, onelogin] });
   process.env.SSO_PROVIDERS = ssoProvidersJson(entries);
   assert.deepStrictEqual(runtimeSsoProviders(), [
-    { name: 'sso', label: 'Contoso', primary: true },
-    { name: 'onelogin', label: 'onelogin', primary: false },
+    { name: 'sso', label: 'Contoso', primary: true, registration: 'sso' },
+    { name: 'onelogin', label: 'onelogin', primary: false, registration: 'onelogin' },
   ]);
+});
+
+test('a runtime list written before the registration name was carried still parses', () => {
+  process.env.SSO_PROVIDERS = JSON.stringify([{ name: 'sso', label: 'sso', primary: true }]);
+  assert.deepStrictEqual(runtimeSsoProviders(), [{ name: 'sso', label: 'sso', primary: true }]);
 });
 
 test('with no SSO_PROVIDERS but a configured issuer, the single-IdP shape returns', () => {

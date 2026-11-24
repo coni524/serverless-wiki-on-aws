@@ -16,12 +16,14 @@ import { Notice, Plugin, type TAbstractFile } from 'obsidian';
 
 import { SyncApi } from './api';
 import { AuthClient, PROTOCOL_ACTION } from './auth';
+import { confirmMove } from './confirm';
 import { t } from './i18n';
 import { describeReport, worthReporting } from './report';
 import { DEFAULT_SETTINGS, type SlWikiSettings } from './settings';
 import { SlWikiSettingTab } from './settings-tab';
 import { SyncStateStore } from './state';
 import { SyncEngine } from './sync';
+import { type SecretStore, TokenStore } from './token-store';
 
 export default class SlWikiPlugin extends Plugin {
   // `Plugin` declares `settings?: unknown` for exactly this; narrowing it here
@@ -31,8 +33,12 @@ export default class SlWikiPlugin extends Plugin {
   api!: SyncApi;
   sync!: SyncEngine;
   state!: SyncStateStore;
+  /** Where the tokens are kept: secret storage where Obsidian has it. */
+  tokens!: TokenStore;
   private settingTab!: SlWikiSettingTab;
   private timer: number | null = null;
+  /** Spaces whose pause for confirmation has already been announced. */
+  private readonly toldPaused = new Set<string>();
 
   override async onload(): Promise<void> {
     await this.loadSettings();
@@ -44,10 +50,23 @@ export default class SlWikiPlugin extends Plugin {
       this.app.vault.adapter,
       this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`,
     );
-    this.sync = new SyncEngine(this.app, this.api, this.state, () => ({
-      spaceIds: this.settings.syncedSpaceIds,
-      deleteSpaceIds: this.settings.pushDeleteSpaceIds,
-    }));
+    this.sync = new SyncEngine(
+      this.app,
+      this.api,
+      this.state,
+      () => ({
+        spaceIds: this.settings.syncedSpaceIds,
+        deleteSpaceIds: this.settings.pushDeleteSpaceIds,
+        adoptFolders: this.settings.adoptFolders,
+      }),
+      // A confirmation is good for one import. Once the space has a record it
+      // is not needed, and after the record is cleared it must be asked again.
+      async (spaceId) => {
+        const { [spaceId]: _used, ...rest } = this.settings.adoptFolders;
+        this.settings.adoptFolders = rest;
+        await this.saveSettings();
+      },
+    );
     this.addSettingTab(this.settingTab);
 
     // Renaming or dragging a note in Obsidian is the user saying the page has a
@@ -77,7 +96,7 @@ export default class SlWikiPlugin extends Plugin {
       name: t.commandSignIn,
       callback: () => {
         void this.report(async () => {
-          await this.auth.beginSignIn();
+          await this.auth.beginSignIn((from, to) => confirmMove(this.app, from, to));
           new Notice(t.signInInBrowser);
         });
       },
@@ -115,11 +134,18 @@ export default class SlWikiPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // `secretStorage` is declared unconditionally by the typings, but only an
+    // Obsidian from 1.11.4 on has it; `minAppVersion` is older on purpose.
+    const secrets = (this.app as { secretStorage?: SecretStore }).secretStorage;
+    this.tokens = new TokenStore(secrets ?? null);
+    const loaded = this.tokens.load(await this.loadData());
+    this.settings = loaded.settings;
+    if (loaded.rewrite) await this.saveSettings();
   }
 
+  /** Save the settings, with the tokens kept apart from `data.json` where possible. */
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    await this.saveData(this.tokens.persist(this.settings));
   }
 
   /**
@@ -134,6 +160,9 @@ export default class SlWikiPlugin extends Plugin {
       if (trigger === 'manual') new Notice(t.syncAlreadyRunning);
       return;
     }
+    // Tokens an earlier version stored are given their issuer before the
+    // check below, which reads them as signed out until then.
+    await this.auth.adoptLegacy();
     if (!this.auth.signedIn || this.settings.syncedSpaceIds.length === 0) {
       if (trigger === 'manual') {
         new Notice(this.auth.signedIn ? t.noSpacesSelected : t.notSignedIn);
@@ -143,6 +172,13 @@ export default class SlWikiPlugin extends Plugin {
 
     try {
       const report = await this.sync.run();
+      // Said once per space and session, not every few minutes: the settings
+      // screen keeps showing the question until it is answered.
+      for (const paused of report.paused) {
+        if (this.toldPaused.has(paused.spaceId)) continue;
+        this.toldPaused.add(paused.spaceId);
+        new Notice(t.spacePausedNotice(paused.name, paused.folder), 15_000);
+      }
       if (trigger === 'manual' || worthReporting(report)) {
         new Notice(
           t.syncDone(describeReport(report)),

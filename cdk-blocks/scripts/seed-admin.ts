@@ -9,12 +9,25 @@
  * "no permissions" answer for this account pick the change up immediately.
  *
  *   AWS:    AWS_PROFILE=<profile> pnpm run seed-admin -- --table <name> --email you@example.com
+ *           AWS_PROFILE=<profile> pnpm run seed-admin -- --table <name> --sub <sub>
  *   local:  pnpm run seed-admin -- --local --email admin@example.test
+ *           pnpm run seed-admin -- --local --sub <sub>
  *
  * The `sub` comes out of the table itself, not out of Cognito: the first
  * sign-in writes `USER#<sub>` / `PROFILE` with the lower-cased address in
  * `gsi1sk`, so one index read finds it. The person therefore has to
  * have signed in once before this runs.
+ *
+ * An address alone is not an identity, so `--email` chooses only among
+ * password accounts. Those are created by the operator (the pool takes no
+ * sign-ups), so their address is one the operator vouched for. A federated
+ * account's address is whatever its IdP asserted, and a second IdP, or a user
+ * who can edit their own address there, can assert anyone's. Such an account is
+ * therefore never chosen by address: the operator confirms whose account it is
+ * outside this script and names it with `--sub`, which is also how a federated
+ * administrator is brought back after an IdP misconfiguration locks everyone
+ * out. When the address matches more than one password account, or only
+ * federated ones, nothing is written and the candidates are listed instead.
  *
  * Every write is conditional on the record being absent, so re-running fills in
  * only what is missing and never overwrites an edge someone edited since. That
@@ -145,13 +158,29 @@ export function epochRecord(at: string): Item {
   });
 }
 
+/** One directory record, as much of it as choosing whom to promote needs. */
+export type Profile = {
+  sub: string;
+  email: string;
+  /** The external IdP that signed this account in; absent for a password account. */
+  identityProvider?: string;
+};
+
+/**
+ * Whom to promote: a password account by its address, or any account by the
+ * `sub` the operator confirmed.
+ */
+export type Target = { email: string } | { sub: string };
+
 /**
  * Where the records go. The two implementations differ only in how they read
- * one index and write one item; everything above them is shared.
+ * and write items; everything above them is shared.
  */
-type Store = {
-  /** The `sub` of the account that signed in with this address, or `null`. */
-  findUserSub(email: string): Promise<string | null>;
+export type Store = {
+  /** Every directory record whose address is `email`, read off the index. */
+  profilesByEmail(email: string): Promise<Profile[]>;
+  /** The directory record of this `sub`, or `null`. */
+  profileBySub(sub: string): Promise<Profile | null>;
   /** Writes unless the key is taken. `false` means the record was already there. */
   putIfAbsent(record: Item): Promise<boolean>;
   /** Last-writer-wins write; the epoch record is meant to be overwritten. */
@@ -160,20 +189,30 @@ type Store = {
 
 // ─── Local mock ──────────────────────────────────────────────────────────────
 
+/** The fields of a directory record that `Profile` carries. */
+function profileOf(item: Item): Profile {
+  return {
+    sub: idOf(item.pk),
+    email: item.email ?? '',
+    ...(item.identityProvider !== undefined ? { identityProvider: item.identityProvider } : {}),
+  };
+}
+
 function localStore(): Store {
   const { items: data, flush } = openLocalTable(
     'Run `pnpm run dev`, sign up, sign in once, then stop the server and re-run this.',
   );
 
   return {
-    async findUserSub(email) {
+    async profilesByEmail(email) {
       const wanted = sortable(email);
-      for (const item of data.values()) {
-        if (item.type === 'USER' && item.sk === PROFILE && item.gsi1sk === wanted) {
-          return idOf(item.pk);
-        }
-      }
-      return null;
+      return [...data.values()]
+        .filter((item) => item.type === 'USER' && item.sk === PROFILE && item.gsi1sk === wanted)
+        .map(profileOf);
+    },
+    async profileBySub(sub) {
+      const item = data.get(localKey(userPk(sub), PROFILE));
+      return item?.type === 'USER' ? profileOf(item) : null;
     },
     async putIfAbsent(record) {
       const key = localKey(record.pk, record.sk);
@@ -216,9 +255,30 @@ function marshal(record: Item): Record<string, unknown> {
   );
 }
 
+/** A directory record in DynamoDB's wire format, as far as `Profile` reads it. */
+type WireProfile = {
+  pk?: { S?: string };
+  sk?: { S?: string };
+  email?: { S?: string };
+  identityProvider?: { S?: string };
+};
+
+/** The `Profile` of a wire-format item, or `null` when it is not a directory record. */
+function wireProfileOf(item: WireProfile): Profile | null {
+  if (item.sk?.S !== PROFILE || item.pk?.S === undefined) return null;
+  const identityProvider = item.identityProvider?.S;
+  return {
+    sub: idOf(item.pk.S),
+    email: item.email?.S ?? '',
+    ...(identityProvider !== undefined ? { identityProvider } : {}),
+  };
+}
+
 function awsStore(tableName: string): Store {
   return {
-    async findUserSub(email) {
+    async profilesByEmail(email) {
+      // One partition of the index, every page of it: the CLI follows
+      // `LastEvaluatedKey` itself, so no matching record is left unread.
       const result = await awsCli([
         'dynamodb',
         'query',
@@ -231,9 +291,22 @@ function awsStore(tableName: string): Store {
         '--expression-attribute-values',
         JSON.stringify({ ':pk': { S: ALL_USERS }, ':sk': { S: sortable(email) } }),
       ]);
-      const items = (result.Items ?? []) as { pk?: { S?: string }; sk?: { S?: string } }[];
-      const profile = items.find((item) => item.sk?.S === PROFILE);
-      return profile?.pk?.S === undefined ? null : idOf(profile.pk.S);
+      return ((result.Items ?? []) as WireProfile[])
+        .map(wireProfileOf)
+        .filter((profile): profile is Profile => profile !== null);
+    },
+    async profileBySub(sub) {
+      const result = await awsCli([
+        'dynamodb',
+        'get-item',
+        '--table-name',
+        tableName,
+        '--key',
+        JSON.stringify({ pk: { S: userPk(sub) }, sk: { S: PROFILE } }),
+        '--consistent-read',
+      ]);
+      const item = result.Item as WireProfile | undefined;
+      return item === undefined ? null : wireProfileOf(item);
     },
     async putIfAbsent(record) {
       try {
@@ -268,22 +341,99 @@ function awsStore(tableName: string): Store {
   };
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ─── Choosing the account ────────────────────────────────────────────────────
 
-/** Write the four records, reporting which of them were missing. */
-export async function seed(
-  store: Store,
-  email: string,
-  log: (line: string) => void = console.log,
-): Promise<void> {
-  const userSub = await store.findUserSub(email);
-  if (userSub === null) {
+/** How a candidate reads in a listing: its sub, how it signs in, its address. */
+const describe = (profile: Profile) =>
+  `  ${profile.sub}  ${profile.identityProvider ?? 'password'}  ${profile.email}`;
+
+/**
+ * The one account `email` may promote, or an error that lists the candidates.
+ *
+ * Only a password account is chosen by address, and only when it is the one
+ * password account with that address. A federated record with the same address
+ * is never a reason to pick it, and never a reason to refuse the password
+ * account either: the scenario this guards against is exactly someone else's
+ * IdP asserting the operator's address.
+ */
+export function chooseByEmail(email: string, profiles: Profile[]): Profile {
+  if (profiles.length === 0) {
     throw new Error(
       `No account has signed in with ${email}.\n` +
         'The sub is read from the profile record the first sign-in writes, so sign in once first.',
     );
   }
+  const password = profiles.filter((profile) => profile.identityProvider === undefined);
+  const federated = profiles.filter((profile) => profile.identityProvider !== undefined);
+
+  if (password.length === 1) return password[0]!;
+
+  if (password.length > 1) {
+    throw new Error(
+      `${password.length} password accounts have signed in with ${email}, so the address ` +
+        'does not say which one to promote. Nothing was written.\n' +
+        'Candidates (sub, sign-in, address):\n' +
+        `${profiles.map(describe).join('\n')}\n` +
+        'Confirm in the Cognito console which sub belongs to the person, then re-run with ' +
+        '--sub <sub> in place of --email.',
+    );
+  }
+
+  throw new Error(
+    `Only federated accounts have signed in with ${email}. Nothing was written.\n` +
+      'A federated account is never chosen by address: the address is what its IdP ' +
+      'asserted, and another IdP, or a user who can edit their own address there, can ' +
+      'assert the same one.\n' +
+      'Candidates (sub, sign-in, address):\n' +
+      `${federated.map(describe).join('\n')}\n` +
+      "Confirm whose account each one is: in the Cognito console the user's name is " +
+      '<registration name>_<sub at the IdP>; check that sub against the IdP, then re-run ' +
+      'with --sub <sub> in place of --email.',
+  );
+}
+
+/** The account the target names, after the checks above. */
+async function chooseAccount(
+  store: Store,
+  target: Target,
+  log: (line: string) => void,
+): Promise<Profile> {
+  if ('sub' in target) {
+    const profile = await store.profileBySub(target.sub);
+    if (profile === null) {
+      throw new Error(
+        `No profile record exists for sub ${target.sub}.\n` +
+          'The record is written by the first sign-in, so the person has to sign in once first.',
+      );
+    }
+    return profile;
+  }
+
+  const profiles = await store.profilesByEmail(target.email);
+  const chosen = chooseByEmail(target.email, profiles);
+  const skipped = profiles.filter((profile) => profile !== chosen);
+  if (skipped.length > 0) {
+    log('Not considered (federated accounts are chosen only with --sub):');
+    for (const profile of skipped) log(describe(profile));
+  }
+  return chosen;
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+/** Write the four records, reporting which of them were missing. */
+export async function seed(
+  store: Store,
+  target: Target,
+  log: (line: string) => void = console.log,
+): Promise<void> {
+  const profile = await chooseAccount(store, target, log);
+  const userSub = profile.sub;
+  // Shown before anything is written, so an operator who named the wrong
+  // account sees whose it is in the same output that reports the writes.
   log(`sub: ${userSub}`);
+  log(`email: ${profile.email}`);
+  log(`sign-in: ${profile.identityProvider ?? 'password'}`);
 
   let written = 0;
   for (const record of adminRecords(userSub, new Date().toISOString())) {
@@ -309,14 +459,21 @@ export async function seed(
  * Exported for the e2e suite, which stops the dev server itself and so does not
  * need the running-server guard `main()` applies.
  */
-export const seedLocal = (email: string, log?: (line: string) => void) =>
-  seed(localStore(), email, log);
+export const seedLocal = (target: Target, log?: (line: string) => void) =>
+  seed(localStore(), target, log);
 
 function usage(): never {
   console.error(
     'Usage:\n' +
       '  pnpm run seed-admin -- --table <table-name> --email <address>   (deployed stack)\n' +
+      '  pnpm run seed-admin -- --table <table-name> --sub <sub>         (deployed stack)\n' +
       '  pnpm run seed-admin -- --local --email <address>                (local mock)\n' +
+      '  pnpm run seed-admin -- --local --sub <sub>                      (local mock)\n' +
+      '\n' +
+      'Give exactly one of --email and --sub.\n' +
+      '  --email  chooses a password account, and only when exactly one has that address.\n' +
+      '  --sub    names any account, federated ones included. A federated account is\n' +
+      '           never chosen by address: confirm whose account the sub is first.\n' +
       '\n' +
       'Find the table name with: aws dynamodb list-tables',
   );
@@ -327,13 +484,18 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const valueOf = (flag: string) => {
     const at = args.indexOf(flag);
-    return at === -1 ? undefined : args[at + 1];
+    if (at === -1) return undefined;
+    const value = args[at + 1];
+    // A missing value, or the next flag where the value should be, is a typo.
+    return value === undefined || value.startsWith('--') || value.trim() === '' ? usage() : value;
   };
   const email = valueOf('--email');
+  const sub = valueOf('--sub');
   const tableName = valueOf('--table');
   const local = args.includes('--local');
 
-  if (email === undefined || local === (tableName !== undefined)) usage();
+  if ((email === undefined) === (sub === undefined) || local === (tableName !== undefined)) usage();
+  const target: Target = sub !== undefined ? { sub } : { email: email as string };
 
   if (local) {
     // The mock reads its file once at start-up and rewrites it whole on every
@@ -344,11 +506,11 @@ async function main(): Promise<void> {
       console.error('The dev server is running. Stop it, re-run this, then start it again.');
       process.exit(1);
     }
-    await seedLocal(email);
+    await seedLocal(target);
     return;
   }
 
-  await seed(awsStore(tableName as string), email);
+  await seed(awsStore(tableName as string), target);
 }
 
 // Guarded so the e2e suite can import `seed` without the CLI running too.

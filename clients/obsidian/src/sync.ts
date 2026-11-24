@@ -18,7 +18,14 @@
 import { type App, TFile, TFolder } from 'obsidian';
 
 import type { SpaceSummary, SyncApi } from './api';
-import { type AttachmentContext, attachmentFolder, toVaultBody } from './attachments';
+import {
+  type AttachmentContext,
+  attachmentFolder,
+  disarmTargets,
+  disarmWritten,
+  toVaultBody,
+  wikiTargets,
+} from './attachments';
 import { t } from './i18n';
 import {
   ATTACHMENT_DIR,
@@ -27,8 +34,10 @@ import {
   type RemoteNode,
   depthOf,
   dirname,
+  isQuarantinePath,
   planNodes,
   planSpaceFolders,
+  quarantineOrigin,
   quarantinePath,
   stampOf,
 } from './paths';
@@ -44,18 +53,31 @@ export type SyncOptions = {
   spaceIds: string[];
   /** Those among them where deleting a note deletes the page (default: none). */
   deleteSpaceIds: string[];
+  /**
+   * Space id → the existing, non-empty folder the user agreed to import on the
+   * space's first cycle. Without an entry naming the very folder the space
+   * maps to, such a space is paused rather than synced.
+   */
+  adoptFolders: Record<string, string>;
 };
 
 export class SyncEngine {
   private running = false;
   /** The last cycle's outcome, for the settings screen to show. */
   last: { at: number; report: SyncReport } | null = null;
+  /**
+   * Space id → the folder a space is paused on, awaiting the user's word that
+   * it may be imported. As of the last cycle, for the settings screen.
+   */
+  readonly awaiting = new Map<string, string>();
 
   constructor(
     private readonly app: App,
     private readonly api: SyncApi,
     private readonly state: SyncStateStore,
     private readonly options: () => SyncOptions,
+    /** Called once a confirmation from `adoptFolders` has been acted on. */
+    private readonly onAdopted: (spaceId: string) => Promise<void> = async () => undefined,
   ) {}
 
   get busy(): boolean {
@@ -92,17 +114,20 @@ export class SyncEngine {
       const folders = planSpaceFolders(spaces);
       for (const space of spaces) {
         try {
-          await this.syncSpace(
+          const visited = await this.syncSpace(
             space,
             folders.get(space.spaceId) ?? space.spaceId,
             deleting.has(space.spaceId),
+            options.adoptFolders[space.spaceId],
             report,
           );
-          report.spaces += 1;
+          if (visited) report.spaces += 1;
         } catch (error: unknown) {
           report.failures.push(`${space.name}: ${describe(error)}`);
         }
       }
+      this.awaiting.clear();
+      for (const paused of report.paused) this.awaiting.set(paused.spaceId, paused.folder);
       await this.state.save();
       return report;
     } finally {
@@ -119,20 +144,29 @@ export class SyncEngine {
    * computed from a picture of the Wiki that already includes this cycle's own
    * writes. Placing them from the older picture would move a page the push half
    * had just renamed straight back to its old name.
+   *
+   * Returns false for a space left alone this cycle (`claimFolder`).
    */
   private async syncSpace(
     space: SpaceSummary,
     folder: string,
     reflectDeletes: boolean,
+    adopt: string | undefined,
     report: SyncReport,
-  ): Promise<void> {
-    const known = this.state.forSpace(space.spaceId, folder);
+  ): Promise<boolean> {
+    const known = await this.claimFolder(space, folder, adopt, report);
+    if (known === null) return false;
     let nodes = await this.api.listAllNodes(space.spaceId);
     let plan = planNodes(folder, nodes);
 
+    if (known.linksChecked !== true) {
+      await this.recheckLinks(folder, nodes, known);
+      known.linksChecked = true;
+    }
+
     const sent = await pushSpace(this.app, this.api, {
       space,
-      folder,
+      folder: known.folder,
       nodes,
       plan,
       known,
@@ -145,22 +179,212 @@ export class SyncEngine {
     }
 
     await this.pullSpace(folder, nodes, plan, known, report);
+    return true;
+  }
+
+  /**
+   * The space's record, with its folder where the plan says — or null when the
+   * space is to be left alone this cycle.
+   *
+   * The push half reads every note under the folder it is given and sends what
+   * the Wiki does not have, so the folder has to be the one this plugin wrote
+   * for this space and nothing else. The folder name comes from the space's
+   * name, which any admin of the space can change, so a name alone never makes
+   * a folder the space's:
+   *
+   * - A renamed space has its recorded folder moved to the new name *before*
+   *   anything is sent. If a folder of the new name already exists, it is some
+   *   other folder — the user's own, or another space's — and the space is
+   *   skipped and reported rather than sending that folder's notes. The same
+   *   when the recorded folder has gone missing and the record says something
+   *   was written there.
+   * - A space with no record (seen for the first time, or after the record was
+   *   cleared) whose folder already exists and holds something is paused until
+   *   the user confirms importing that very folder in the settings. An empty
+   *   or absent folder needs no confirmation: there is nothing in it to send.
+   *
+   * Names are compared without regard to case when deciding whether the
+   * destination is taken. On a case-insensitive disk `Journal` and `journal`
+   * are one folder, and writing the space into the second would put its notes
+   * among the first's — so a folder that differs from the space's name in case
+   * alone counts as taken, and is never imported.
+   */
+  private async claimFolder(
+    space: SpaceSummary,
+    folder: string,
+    adopt: string | undefined,
+    report: SyncReport,
+  ): Promise<SpaceState | null> {
+    let known = this.state.get(space.spaceId);
+
+    if (known !== undefined && known.folder !== folder) {
+      const source = this.app.vault.getAbstractFileByPath(known.folder);
+      const wrote = Object.keys(known.pages).length + Object.keys(known.folders).length > 0;
+      if (!(source instanceof TFolder)) {
+        if (wrote) throw new Error(t.spaceFolderMissing(known.folder, folder));
+        // Nothing was ever written for this record, so there is nothing to
+        // follow; the space starts over as if it had never been seen.
+        this.state.forget(space.spaceId);
+        known = undefined;
+      } else {
+        // The recorded folder itself is the one match allowed: a rename that
+        // changes only the case of the space's name moves it onto itself.
+        const taken = this.sameNameAtTop(folder).filter((path) => path !== known?.folder);
+        if (taken.length > 0) {
+          throw new Error(t.spaceFolderTaken(known.folder, taken[0]));
+        }
+        // The pictures live inside the space's folder, so renaming it carries
+        // them along with the notes — the recorded paths follow, and every link
+        // between the two keeps counting the same number of folders.
+        if (!(await this.moveFolder(known.folder, folder, known, true))) {
+          throw new Error(t.spaceFolderMissing(known.folder, folder));
+        }
+        known.folder = folder;
+        // Written now rather than at the end of the cycle. A cycle that stops
+        // after the move would otherwise leave a record naming the old folder,
+        // which no longer exists, and the space would be stuck on that.
+        await this.state.save();
+      }
+    }
+
+    if (known === undefined) {
+      const clash = this.sameNameAtTop(folder).find((path) => path !== folder);
+      if (clash !== undefined) throw new Error(t.spaceFolderCaseClash(clash, folder));
+      const existing = this.app.vault.getAbstractFileByPath(folder);
+      const occupied = existing instanceof TFolder && existing.children.length > 0;
+      if (occupied && adopt !== folder) {
+        report.paused.push({ spaceId: space.spaceId, name: space.name, folder });
+        return null;
+      }
+      known = this.state.forSpace(space.spaceId, folder);
+      if (adopt !== undefined) await this.onAdopted(space.spaceId);
+    }
+    return known;
+  }
+
+  /** Top-level entries whose name is `name` once case is ignored. */
+  private sameNameAtTop(name: string): string[] {
+    const lower = name.toLowerCase();
+    return this.app.vault
+      .getRoot()
+      .children.filter((child) => child.path.toLowerCase() === lower)
+      .map((child) => child.path);
+  }
+
+  /**
+   * Make plain links of the picture links an earlier version let through from
+   * the Wiki's text, before the push half reads the notes.
+   *
+   * That version disarmed `![](x)` but not `!![](x)`, which it turned into a
+   * working `![](x)`. A note written that way keeps the link until the Wiki's
+   * copy of the page changes, and the push half uploads whatever vault file the
+   * link resolves to as soon as the user edits the note. So the notes of a
+   * record from that version are checked once:
+   *
+   * - A note still exactly as the plugin wrote it holds the Wiki's text, and
+   *   any picture link in it that is not one of the page's own attachments is
+   *   made a plain link — what this version writes for the same body.
+   * - A note the user has edited is sent only while the Wiki's copy is the one
+   *   it was written from, so that copy is fetched and only the links taken
+   *   from it are made plain. The user's own pictures keep uploading. One
+   *   request per edited note, and only on this one cycle.
+   *
+   * - A conflict copy is never sent, but the user may rename one back into
+   *   place, and the text in it is an earlier body of the same page. The links
+   *   the Wiki's current copy of that page plants are made plain there too.
+   *
+   * Anything that cannot be checked stops the space for this cycle, before
+   * anything is sent, and the check runs again on the next one.
+   */
+  private async recheckLinks(folder: string, nodes: RemoteNode[], known: SpaceState): Promise<void> {
+    const remote = new Map(nodes.map((node) => [node.pageId, node]));
+    const bodies = new Map<string, Promise<string | undefined>>();
+    const wikiBody = (pageId: string): Promise<string | undefined> => {
+      let body = bodies.get(pageId);
+      if (body === undefined) {
+        body = this.api.getPage(pageId).then((detail) => detail.body);
+        bodies.set(pageId, body);
+      }
+      return body;
+    };
+
+    for (const [pageId, entry] of Object.entries(known.pages)) {
+      const node = remote.get(pageId);
+      const file = this.app.vault.getAbstractFileByPath(entry.path);
+      // A page the Wiki no longer has is trashed by the pull half, not sent.
+      if (node === undefined || !(file instanceof TFile)) continue;
+      const current = await this.app.vault.read(file);
+
+      if ((await contentHash(current)) === entry.hash) {
+        const checked = disarmWritten(
+          this.contextFor(folder, pageId),
+          current,
+          entry.path,
+          entry.attachments ?? {},
+          entry.rendered ?? entry.path,
+        );
+        if (checked === null) throw new Error(`${entry.path}: ${t.unsafePictureLinks}`);
+        if (checked !== current) {
+          await this.app.vault.modify(file, checked);
+          entry.hash = await contentHash(checked);
+        }
+        continue;
+      }
+
+      // Edited, but the Wiki has moved on: the push half does not send this
+      // body, and the pull half sets it aside as a conflict copy, which is
+      // never sent either.
+      if (stampOf(node) !== entry.stamp) continue;
+      const body = await wikiBody(pageId);
+      if (body === undefined) continue;
+      const targets = wikiTargets(body);
+      if (targets.size === 0) continue;
+      const checked = disarmTargets(current, targets);
+      if (checked === null) throw new Error(`${entry.path}: ${t.unsafePictureLinks}`);
+      // The recorded hash is left as it was: the note is still an edit to send.
+      if (checked !== current) await this.app.vault.modify(file, checked);
+    }
+
+    const root = this.app.vault.getAbstractFileByPath(folder);
+    if (!(root instanceof TFolder)) return;
+    const pageAt = new Map(Object.entries(known.pages).map(([pageId, entry]) => [entry.path, pageId]));
+    const copies: TFile[] = [];
+    const walk = (dir: TFolder): void => {
+      for (const child of dir.children) {
+        if (child instanceof TFolder) walk(child);
+        else if (child instanceof TFile && isQuarantinePath(child.path)) copies.push(child);
+      }
+    };
+    walk(root);
+    for (const copy of copies) {
+      const pageId = pageAt.get(quarantineOrigin(copy.path));
+      if (pageId === undefined || !remote.has(pageId)) continue;
+      const body = await wikiBody(pageId);
+      if (body === undefined) continue;
+      const targets = wikiTargets(body);
+      if (targets.size === 0) continue;
+      const current = await this.app.vault.read(copy);
+      const checked = disarmTargets(current, targets);
+      if (checked === null) throw new Error(`${copy.path}: ${t.unsafePictureLinks}`);
+      if (checked !== current) await this.app.vault.modify(copy, checked);
+    }
   }
 
   /**
    * ─── The order within one space ───────────────────────────────────────────
-   * 1. follow the space's own folder if the space was renamed
-   * 2. trash the notes the Wiki no longer has, deepest first
-   * 3. place the folders — rename what moved, create what is new, parents first
-   * 4. move the notes that belong elsewhere
-   * 5. fetch the bodies that changed
-   * 6. remove the folders the Wiki no longer has, deepest first and only when
+   * The space's own folder has already been put under its current name
+   * (`claimFolder`), before the push half ran. Then:
+   * 1. trash the notes the Wiki no longer has, deepest first
+   * 2. place the folders — rename what moved, create what is new, parents first
+   * 3. move the notes that belong elsewhere
+   * 4. fetch the bodies that changed
+   * 5. remove the folders the Wiki no longer has, deepest first and only when
    *    they are empty
    *
    * Folders are placed before the notes are moved so that a note's destination
    * exists and is already under its final name — and a folder rename carries
    * every descendant with it in one step, which leaves most notes already where
-   * they belong by the time step 4 looks at them.
+   * they belong by the time step 3 looks at them.
    *
    * A folder the Wiki dropped is removed last for the same reason read
    * backwards: whatever was inside it has by then been trashed (a cascading
@@ -176,14 +400,6 @@ export class SyncEngine {
     report: SyncReport,
   ): Promise<void> {
     report.skipped += nodes.length - plan.nodes.size;
-
-    if (known.folder !== folder) {
-      // The pictures live inside the space's folder, so renaming it carries
-      // them along with the notes — the recorded paths follow, and every link
-      // between the two keeps counting the same number of folders.
-      await this.moveFolder(known.folder, folder, known, true);
-      known.folder = folder;
-    }
     await this.ensureFolder(folder);
 
     const removed = Object.keys(known.pages)

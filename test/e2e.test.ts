@@ -352,7 +352,7 @@ test('bootstrap: seeding the table makes the first administrator', async () => {
         'pick up the seeding. Stop the dev server and run the suite again.',
     );
     await stopDevServer();
-    await seedLocal(ADMIN, () => {});
+    await seedLocal({ email: ADMIN }, () => {});
     server = spawnDevServer();
     await waitForApi();
     await signInAs(ADMIN, ADMIN_PASSWORD);
@@ -368,11 +368,12 @@ test('bootstrap: seeding an address that never signed in is refused', async () =
   // nothing to point a membership at until then. Guessing one would create a
   // membership for an account that may never exist.
   const store = {
-    async findUserSub() { return null; },
+    async profilesByEmail() { return []; },
+    async profileBySub() { return null; },
     async putIfAbsent() { return true; },
     async put() {},
   };
-  await rejects(() => seed(store, 'nobody@example.test', () => {}), 'signed in');
+  await rejects(() => seed(store, { email: 'nobody@example.test' }, () => {}), 'signed in');
 });
 
 test('bootstrap: re-running the seeding writes nothing the second time', async () => {
@@ -382,7 +383,8 @@ test('bootstrap: re-running the seeding writes nothing the second time', async (
   const written = new Map<string, unknown>();
   let epochBumps = 0;
   const store = {
-    async findUserSub() { return 'sub-under-test'; },
+    async profilesByEmail() { return [{ sub: 'sub-under-test', email: ADMIN }]; },
+    async profileBySub() { return null; },
     async putIfAbsent(record: { pk: string; sk: string }) {
       const key = `${record.pk}\0${record.sk}`;
       if (written.has(key)) return false;
@@ -392,10 +394,10 @@ test('bootstrap: re-running the seeding writes nothing the second time', async (
     async put() { epochBumps += 1; },
   };
 
-  await seed(store, ADMIN, () => {});
+  await seed(store, { email: ADMIN }, () => {});
   assert.strictEqual(written.size, 4, 'Expected the four records the model calls for');
   assert.strictEqual(epochBumps, 1, 'Seeding changed permissions, so the epoch must move');
-  await seed(store, ADMIN, () => {});
+  await seed(store, { email: ADMIN }, () => {});
   assert.strictEqual(written.size, 4, 'A second run must not add records');
   assert.strictEqual(epochBumps, 1, 'A run that wrote nothing must leave the epoch alone');
 });
@@ -2958,6 +2960,10 @@ test('federation: signing out ends the federated session on the server', async (
     stored.version,
   );
 
+  // A sign-in's groups are applied once per `auth_time`, which has one-second
+  // resolution, and the refused sign-in above may share this one's second —
+  // in which case this one would be taken for it and not applied again.
+  await setTimeout(1100);
   await signOutOfEverything();
   await signInThroughIdpExpectingSession();
   assert.strictEqual((await api.me()).identityProvider, 'sso');

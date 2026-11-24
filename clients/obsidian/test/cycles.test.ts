@@ -21,10 +21,15 @@ import test from 'node:test';
 
 import type { App } from 'obsidian';
 
-import type { SyncApi } from '../src/api';
-import { toVaultBody } from '../src/attachments';
-import { SyncStateStore } from '../src/state';
+import { SyncApi } from '../src/api';
+import { AuthClient } from '../src/auth';
+import { toVaultBody, wikiTargets } from '../src/attachments';
+import { DEFAULT_SETTINGS, type SlWikiSettings, type StoredTokens } from '../src/settings';
+import { SyncStateStore, contentHash } from '../src/state';
+import { emptyReport, worthReporting } from '../src/report';
 import { SyncEngine } from '../src/sync';
+import { SECRET_ID, TokenStore } from '../src/token-store';
+import { type StubRequest, http } from './obsidian-stub';
 import { FakeVault } from './vault';
 import { FakeWiki } from './wiki';
 
@@ -58,12 +63,27 @@ function bench(options: { state?: unknown; reflectDeletes?: boolean } = {}) {
   const vault = new FakeVault();
   const adapter = new FakeAdapter(options.state);
   const state = new SyncStateStore(adapter as never, 'plugins/slwiki-sync');
-  const app = { vault } as unknown as App;
-  const engine = new SyncEngine(app, wiki.api() as unknown as SyncApi, state, () => ({
-    spaceIds: ['s1'],
-    deleteSpaceIds: options.reflectDeletes === true ? ['s1'] : [],
-  }));
-  return { wiki, vault, state, engine, adapter };
+  const app = {
+    vault,
+    metadataCache: { getFirstLinkpathDest: (name: string) => vault.firstByName(name) },
+  } as unknown as App;
+  const adoptFolders: Record<string, string> = {};
+  const adopted: string[] = [];
+  const engine = new SyncEngine(
+    app,
+    wiki.api() as unknown as SyncApi,
+    state,
+    () => ({
+      spaceIds: ['s1'],
+      deleteSpaceIds: options.reflectDeletes === true ? ['s1'] : [],
+      adoptFolders,
+    }),
+    async (spaceId) => {
+      adopted.push(spaceId);
+      delete adoptFolders[spaceId];
+    },
+  );
+  return { wiki, vault, state, engine, adapter, adoptFolders, adopted };
 }
 
 test('the first cycle mirrors the tree, and the second does nothing', async () => {
@@ -351,4 +371,665 @@ test('a body of unclosed image markup does not stall the sync', async () => {
     const took = Date.now() - started;
     assert.ok(took < 2000, `${JSON.stringify(body.slice(0, 4))}… took ${took}ms`);
   }
+});
+
+test('a run of "!" in front of a picture link does not bring the embed back', async () => {
+  // `!![](x)` is read as an image starting at the second `!`. Removing only
+  // that one left `![](x)` — a live embed of a vault file, which the next push
+  // uploaded to the page as soon as the user edited the note.
+  const body = [
+    '!![](scan.png)',
+    '!![[scan.png]]',
+    '!!!!![](../他/_attachments/x/scan.png)',
+    '!![図](attachment:att1)',
+    '!![![[inner.png]]](outer.png)',
+    '![[a.png]]![[b.png]]!![](c.png)',
+  ].join('\n\n');
+
+  const fromWiki = await toVaultBody(nowhere, body, 'memo/note.md', {}, 'memo/note.md', 'wiki');
+  assert.equal(
+    fromWiki.body.split('\n\n').slice(0, 4).join('\n\n'),
+    [
+      '[](scan.png)',
+      '[[scan.png]]',
+      '[](../他/_attachments/x/scan.png)',
+      // The page's own attachment is left alone, `!` and all.
+      '!![図](attachment:att1)',
+    ].join('\n\n'),
+  );
+  // Whatever else came out, nothing in it is an embed of anything but the
+  // page's own attachments.
+  assert.deepEqual([...wikiTargets(fromWiki.body)], []);
+});
+
+test('a picture link the Wiki slipped past an earlier version is disarmed before a push', async () => {
+  const { wiki, vault, state, engine } = bench();
+  http.requests.length = 0;
+  http.handler = () => ({ status: 200 });
+  try {
+    // A file the attacker cannot read, somewhere else in the vault.
+    await vault.userCreateFolder('private');
+    await vault.create('private/scan.png', 'secret bytes');
+    const page = wiki.seedPage('ページ', null, '!![[scan.png]]');
+    await engine.run();
+    assert.equal(vault.bodyOf('memo/ページ.md'), '[[scan.png]]');
+
+    // What the earlier version wrote for the same body, and its record: a live
+    // embed, the note untouched since, and no mark of having been checked.
+    const note = vault.getAbstractFileByPath('memo/ページ.md') as never;
+    await vault.modify(note, '![[scan.png]]');
+    const known = state.get('s1')!;
+    known.pages[page].hash = await contentHash('![[scan.png]]');
+    delete known.linksChecked;
+
+    const checked = await engine.run();
+    assert.deepEqual(checked.failures, []);
+    assert.equal(vault.bodyOf('memo/ページ.md'), '[[scan.png]]');
+
+    // Now the user edits it, which is when the old embed would have uploaded.
+    await vault.modify(note, '[[scan.png]]\n\n追記');
+    const edited = await engine.run();
+    assert.deepEqual(edited.failures, []);
+    assert.equal(edited.uploaded, 0);
+    assert.ok(!wiki.calls.some((call) => call.startsWith('upload')), wiki.calls.join('\n'));
+  } finally {
+    http.handler = null;
+  }
+});
+
+test('an edited note keeps its own pictures and loses only the links the Wiki planted', async () => {
+  const { wiki, vault, state, engine } = bench();
+  http.requests.length = 0;
+  http.handler = () => ({ status: 200 });
+  try {
+    await vault.userCreateFolder('private');
+    await vault.create('private/scan.png', 'secret bytes');
+    const page = wiki.seedPage('ページ', null, '!![[scan.png]]');
+    await engine.run();
+
+    // The earlier version's note, edited by the user before this version ran:
+    // the planted embed, and a picture the user pasted themselves.
+    await vault.create('memo/mine.png', 'my bytes');
+    const note = vault.getAbstractFileByPath('memo/ページ.md') as never;
+    await vault.modify(note, '![[scan.png]]\n\n追記 ![[mine.png]]');
+    const known = state.get('s1')!;
+    known.pages[page].hash = await contentHash('![[scan.png]]');
+    delete known.linksChecked;
+
+    const report = await engine.run();
+    assert.deepEqual(report.failures, []);
+    const uploads = wiki.calls.filter((call) => call.startsWith('upload'));
+    assert.deepEqual(uploads, [`upload mine.png to ${page}`]);
+    assert.deepEqual(wiki.tree(), ['- ページ "[[scan.png]]\\n\\n追記 ![mine.png](attachment:att1)"']);
+  } finally {
+    http.handler = null;
+  }
+});
+
+// ─── The space's own folder ──────────────────────────────────────────────────
+
+test('a renamed space takes its folder along before anything is sent', async () => {
+  const { wiki, vault, engine } = bench();
+  wiki.seedPage('メモ', null, '本文');
+  await engine.run();
+
+  wiki.spaceName = '新しい名前';
+  const report = await engine.run();
+  assert.deepEqual(vault.listing(), ['新しい名前/', '新しい名前/メモ.md']);
+  assert.deepEqual([report.created, report.updated, report.deleted], [0, 0, 0]);
+  assert.deepEqual(report.failures, []);
+});
+
+test('a space renamed after a folder that already exists sends nothing from it', async () => {
+  const { wiki, vault, engine } = bench({ reflectDeletes: true });
+  wiki.seedPage('メモ', null, '本文');
+  await engine.run();
+  await vault.userCreateFolder('Journal');
+  await vault.create('Journal/日記.md', '誰にも見せない');
+  const before = wiki.calls.length;
+
+  wiki.spaceName = 'Journal';
+  const report = await engine.run();
+  assert.deepEqual(wiki.calls.slice(before), []);
+  assert.deepEqual(wiki.tree(), ['- メモ "本文"']);
+  assert.equal(report.failures.length, 1);
+  assert.match(report.failures[0], /already exists/);
+  assert.deepEqual(vault.listing(), ['Journal/', 'Journal/日記.md', 'memo/', 'memo/メモ.md']);
+});
+
+test('a renamed space whose recorded folder is gone sends nothing', async () => {
+  const { wiki, vault, engine } = bench();
+  wiki.seedPage('メモ', null, '本文');
+  await engine.run();
+  await vault.trash(vault.getAbstractFileByPath('memo')!, false);
+  await vault.userCreateFolder('Journal');
+  await vault.create('Journal/日記.md', '誰にも見せない');
+  const before = wiki.calls.length;
+
+  wiki.spaceName = 'Journal';
+  const report = await engine.run();
+  assert.deepEqual(wiki.calls.slice(before), []);
+  assert.match(report.failures[0] ?? '', /missing/);
+});
+
+test('a first cycle into a folder that already holds notes waits to be confirmed', async () => {
+  const { wiki, vault, engine, adapter, adoptFolders, adopted } = bench();
+  await vault.userCreateFolder('memo');
+  await vault.create('memo/手元.md', '手元の本文');
+
+  const paused = await engine.run();
+  assert.deepEqual(paused.paused, [{ spaceId: 's1', name: 'memo', folder: 'memo' }]);
+  assert.deepEqual(wiki.calls, []);
+  assert.deepEqual(engine.awaiting.get('s1'), 'memo');
+  // No record either, or the next cycle would take the folder as the space's.
+  assert.deepEqual((adapter.saved as { spaces: object }).spaces, {});
+  assert.deepEqual((await engine.run()).paused.length, 1);
+  assert.deepEqual(wiki.calls, []);
+
+  // A confirmation for some other folder is not one for this folder.
+  adoptFolders.s1 = 'old name';
+  assert.equal((await engine.run()).paused.length, 1);
+  assert.deepEqual(wiki.calls, []);
+
+  adoptFolders.s1 = 'memo';
+  const imported = await engine.run();
+  assert.deepEqual(imported.paused, []);
+  assert.deepEqual(imported.failures, []);
+  assert.deepEqual(wiki.tree(), ['- 手元 "手元の本文"']);
+  assert.deepEqual(adopted, ['s1']);
+  assert.equal(engine.awaiting.size, 0);
+});
+
+test('a paused space is announced once, not on every timed cycle', () => {
+  const report = emptyReport();
+  report.paused.push({ spaceId: 's1', name: 'memo', folder: 'memo' });
+  assert.equal(worthReporting(report), false);
+});
+
+test('a folder whose name differs from the space only in case is never taken for it', async () => {
+  // First cycle: `Memo` may be the very folder `memo` names on this disk.
+  const first = bench();
+  await first.vault.userCreateFolder('Memo');
+  await first.vault.create('Memo/日記.md', '誰にも見せない');
+  first.wiki.seedPage('メモ', null, '本文');
+  const report = await first.engine.run();
+  assert.deepEqual(first.wiki.calls, []);
+  assert.deepEqual(report.paused, []);
+  assert.match(report.failures[0] ?? '', /only in case/);
+  assert.deepEqual(first.vault.listing(), ['Memo/', 'Memo/日記.md']);
+  assert.deepEqual((first.adapter.saved as { spaces: object }).spaces, {});
+
+  // A rename onto a name another folder has in a different case.
+  const renamed = bench();
+  renamed.wiki.seedPage('メモ', null, '本文');
+  await renamed.engine.run();
+  await renamed.vault.userCreateFolder('journal');
+  await renamed.vault.create('journal/日記.md', '誰にも見せない');
+  const before = renamed.wiki.calls.length;
+  renamed.wiki.spaceName = 'Journal';
+  const skipped = await renamed.engine.run();
+  assert.deepEqual(renamed.wiki.calls.slice(before), []);
+  assert.match(skipped.failures[0] ?? '', /already exists/);
+
+  // A rename of the space that changes only its own case is still followed.
+  const own = bench();
+  own.wiki.seedPage('メモ', null, '本文');
+  await own.engine.run();
+  own.wiki.spaceName = 'Memo';
+  const followed = await own.engine.run();
+  assert.deepEqual(followed.failures, []);
+  assert.deepEqual(own.vault.listing(), ['Memo/', 'Memo/メモ.md']);
+});
+
+test('the record names the moved folder before the cycle goes on', async () => {
+  const { wiki, engine, adapter } = bench();
+  wiki.seedPage('メモ', null, '本文');
+  await engine.run();
+
+  let seen: unknown = null;
+  wiki.beforeList = () => {
+    seen = adapter.saved;
+  };
+  wiki.spaceName = '新しい名前';
+  await engine.run();
+  assert.equal((seen as { spaces: Record<string, { folder: string }> }).spaces.s1.folder, '新しい名前');
+});
+
+test('a conflict copy written by an earlier version loses the links the Wiki planted', async () => {
+  const { wiki, vault, state, engine } = bench();
+  await vault.userCreateFolder('private');
+  await vault.create('private/scan.png', 'secret bytes');
+  wiki.seedPage('ページ', null, '!![[scan.png]]');
+  await engine.run();
+
+  const copy = 'memo/ページ (conflict 2026-08-01 0000).md';
+  await vault.create(copy, '![[scan.png]] と手元の文 ![[mine.png]]');
+  delete state.get('s1')!.linksChecked;
+  const report = await engine.run();
+  assert.deepEqual(report.failures, []);
+  assert.equal(vault.bodyOf(copy), '[[scan.png]] と手元の文 ![[mine.png]]');
+});
+
+test('a first cycle into an empty folder needs no confirmation', async () => {
+  const { wiki, vault, engine } = bench();
+  await vault.userCreateFolder('memo');
+  wiki.seedPage('メモ', null, '本文');
+  const report = await engine.run();
+  assert.deepEqual(report.paused, []);
+  assert.deepEqual(vault.listing(), ['memo/', 'memo/メモ.md']);
+});
+
+// ─── Tokens ──────────────────────────────────────────────────────────────────
+
+const WIKI_A = 'https://a.example';
+
+/** Wiki A answers properly; anything else is somebody asking for A's tokens. */
+function wikiA(
+  options: { ext?: (request: StubRequest) => number; discovery?: Record<string, string> | null } = {},
+) {
+  let issued = 0;
+  return (request: StubRequest) => {
+    if (request.url === `${WIKI_A}/.well-known/oauth-authorization-server`) {
+      if (options.discovery === null) return { status: 500 };
+      return {
+        status: 200,
+        text: JSON.stringify(
+          options.discovery ?? {
+            authorization_endpoint: 'https://auth-a.example/authorize',
+            token_endpoint: 'https://auth-a.example/token',
+            revocation_endpoint: 'https://auth-a.example/revoke',
+          },
+        ),
+      };
+    }
+    if (request.url === 'https://auth-a.example/token') {
+      issued += 1;
+      return {
+        status: 200,
+        text: JSON.stringify({ access_token: `access-${issued}`, expires_in: 3600, refresh_token: 'refresh-A' }),
+      };
+    }
+    if (request.url === 'https://auth-a.example/revoke') return { status: 200 };
+    if (request.url.startsWith(`${WIKI_A}/ext/`)) {
+      const status = options.ext?.(request) ?? 200;
+      return { status, text: status === 200 ? '{"spaces":[]}' : '{}' };
+    }
+    return {
+      status: 401,
+      text: JSON.stringify({ token_endpoint: 'https://evil.example/token' }),
+    };
+  };
+}
+
+function authBench(
+  settings: Partial<SlWikiSettings> = {},
+  confirm: (from: string, to: string) => Promise<boolean> = async () => false,
+) {
+  const host = {
+    settings: { ...DEFAULT_SETTINGS, wikiUrl: `${WIKI_A}/`, clientId: 'client-a', ...settings },
+    saveSettings: async () => undefined,
+  };
+  const auth = new AuthClient(host, () => undefined);
+  const api = new SyncApi(host, auth);
+  const opened: string[] = [];
+  (globalThis as { window?: unknown }).window = { open: (url: string) => opened.push(url) };
+  const signIn = async (between?: () => void) => {
+    await auth.beginSignIn(confirm);
+    const state = new URL(opened[opened.length - 1]).searchParams.get('state') ?? '';
+    between?.();
+    await auth.handleCallback({ code: 'code', state });
+  };
+  return { host, auth, api, signIn, opened };
+}
+
+/** Every request that went anywhere but Wiki A and its own Cognito. */
+const strays = (): string[] =>
+  http.requests
+    .map((request) => request.url)
+    .filter((url) => !url.startsWith(WIKI_A) && !url.startsWith('https://auth-a.example/'));
+
+test('tokens from one Wiki are never sent to a Wiki URL typed in afterwards', async () => {
+  http.handler = wikiA();
+  try {
+    const { host, auth, api, signIn } = authBench();
+    await signIn();
+    assert.equal(host.settings.tokens?.issuer?.wikiUrl, WIKI_A);
+    assert.equal(auth.signedIn, true);
+
+    http.requests.length = 0;
+    host.settings.wikiUrl = 'https://b.example';
+    await assert.rejects(api.listSpaces());
+    assert.deepEqual(http.requests, [], 'nothing at all is sent');
+    assert.equal(auth.signedIn, false);
+    assert.equal(auth.otherIssuer, WIKI_A);
+
+    // Not cleared on the way: putting the address back restores the sign-in.
+    host.settings.wikiUrl = WIKI_A;
+    assert.deepEqual(await api.listSpaces(), []);
+    assert.deepEqual(strays(), []);
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+test('a 401 retry is not sent anywhere when the address changed while the request was out', async () => {
+  const bed = authBench();
+  http.handler = wikiA({
+    ext: () => {
+      bed.host.settings.wikiUrl = 'https://b.example';
+      return 401;
+    },
+  });
+  try {
+    await bed.signIn();
+    http.requests.length = 0;
+    await assert.rejects(bed.api.listSpaces());
+    // The one request to A, and then nothing: no refresh, no retry, no B.
+    assert.deepEqual(
+      http.requests.map((request) => request.url),
+      [`${WIKI_A}/ext/listSpaces`],
+    );
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+test('a 401 retry refreshes at the recorded endpoint and goes back to the same Wiki', async () => {
+  let calls = 0;
+  http.handler = wikiA({ ext: () => (++calls === 1 ? 401 : 200) });
+  try {
+    const { api, signIn } = authBench();
+    await signIn();
+    http.requests.length = 0;
+    assert.deepEqual(await api.listSpaces(), []);
+    assert.deepEqual(
+      http.requests.map((request) => request.url),
+      [`${WIKI_A}/ext/listSpaces`, 'https://auth-a.example/token', `${WIKI_A}/ext/listSpaces`],
+    );
+    assert.equal(http.requests[2].headers?.Authorization, 'Bearer access-2');
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+test('signing out revokes only at the Wiki the tokens came from', async () => {
+  http.handler = wikiA();
+  try {
+    const elsewhere = authBench();
+    await elsewhere.signIn();
+    http.requests.length = 0;
+    elsewhere.host.settings.wikiUrl = 'https://b.example';
+    await elsewhere.auth.signOut();
+    assert.deepEqual(http.requests, []);
+    assert.equal(elsewhere.host.settings.tokens, null);
+
+    const home = authBench();
+    await home.signIn();
+    http.requests.length = 0;
+    await home.auth.signOut();
+    assert.deepEqual(
+      (http.requests as StubRequest[]).map((request) => [request.url, request.body]),
+      [['https://auth-a.example/revoke', 'token=refresh-A&client_id=client-a']],
+    );
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+test('a sign-in finishes against the Wiki it was started for', async () => {
+  http.handler = wikiA();
+  try {
+    const { host, auth, signIn } = authBench();
+    await signIn(() => {
+      host.settings.wikiUrl = 'https://b.example';
+    });
+    assert.deepEqual(strays(), []);
+    assert.equal(host.settings.tokens?.issuer?.wikiUrl, WIKI_A);
+    assert.equal(auth.signedIn, false);
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+const LEGACY: StoredTokens = {
+  accessToken: 'old',
+  refreshToken: 'old-refresh',
+  expiresAt: Date.now() + 3_600_000,
+  issuer: null,
+};
+
+test('tokens an earlier version stored are adopted for the Wiki the settings name', async () => {
+  http.handler = wikiA();
+  try {
+    const { host, auth, api } = authBench({ tokens: { ...LEGACY } });
+    http.requests.length = 0;
+    // Not used as they are: nothing is sent until they have an issuer.
+    assert.equal(auth.signedIn, false);
+    assert.equal(auth.legacy, true);
+    await assert.rejects(api.listSpaces());
+    assert.deepEqual(http.requests, []);
+
+    assert.equal(await auth.adoptLegacy(), true);
+    assert.deepEqual(host.settings.tokens?.issuer, {
+      wikiUrl: WIKI_A,
+      clientId: 'client-a',
+      tokenEndpoint: 'https://auth-a.example/token',
+      revocationEndpoint: 'https://auth-a.example/revoke',
+    });
+    assert.deepEqual(await api.listSpaces(), []);
+    assert.deepEqual(strays(), []);
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+test('tokens an earlier version stored are revoked on sign-out, or kept when that cannot be done', async () => {
+  http.handler = wikiA();
+  try {
+    const { host, auth } = authBench({ tokens: { ...LEGACY } });
+    http.requests.length = 0;
+    await auth.signOut();
+    assert.deepEqual(
+      (http.requests as StubRequest[]).filter((request) => request.method === 'POST').map((request) => [request.url, request.body]),
+      [['https://auth-a.example/revoke', 'token=old-refresh&client_id=client-a']],
+    );
+    assert.equal(host.settings.tokens, null);
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+
+  // A discovery document that cannot be trusted adopts nothing, and the
+  // tokens are kept, unused, for a later attempt.
+  http.handler = wikiA({
+    discovery: {
+      authorization_endpoint: 'https://auth-a.example/authorize',
+      token_endpoint: 'https://evil.example/token',
+    },
+  });
+  try {
+    const { host, auth, api } = authBench({ tokens: { ...LEGACY } });
+    assert.equal(await auth.adoptLegacy(), false);
+    assert.equal(host.settings.tokens?.issuer, null);
+    await assert.rejects(api.listSpaces());
+    assert.deepEqual(strays(), []);
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+test('a discovery document is trusted only when every endpoint is https on one origin', async () => {
+  const documents = [
+    { authorization_endpoint: 'https://auth-a.example/authorize', token_endpoint: 'http://auth-a.example/token' },
+    { authorization_endpoint: 'https://auth-a.example/authorize', token_endpoint: 'https://evil.example/token' },
+    {
+      authorization_endpoint: 'https://auth-a.example/authorize',
+      token_endpoint: 'https://auth-a.example/token',
+      revocation_endpoint: 'https://evil.example/revoke',
+    },
+  ];
+  for (const discovery of documents) {
+    http.handler = wikiA({ discovery });
+    try {
+      const { auth, opened } = authBench();
+      await assert.rejects(auth.beginSignIn(async () => true), /https/);
+      assert.deepEqual(opened, []);
+      assert.deepEqual(strays(), []);
+    } finally {
+      http.handler = null;
+      http.requests.length = 0;
+    }
+  }
+});
+
+test('signing in at a new address under the same client id asks first', async () => {
+  http.handler = wikiA();
+  try {
+    const asked: string[][] = [];
+    const bed = authBench({}, async (from, to) => {
+      asked.push([from, to]);
+      return false;
+    });
+    await bed.signIn();
+    bed.host.settings.wikiUrl = 'https://b.example';
+    http.requests.length = 0;
+    await assert.rejects(bed.auth.beginSignIn(async (from, to) => {
+      asked.push([from, to]);
+      return false;
+    }));
+    assert.deepEqual(asked, [[WIKI_A, 'https://b.example']]);
+    // Declined: nothing was even fetched from the new address.
+    assert.deepEqual(http.requests, []);
+
+    await assert.rejects(bed.auth.beginSignIn(async () => true));
+    assert.deepEqual(
+      (http.requests as StubRequest[]).map((request) => request.url),
+      ['https://b.example/.well-known/oauth-authorization-server'],
+    );
+
+    // A new client id is what a real move looks like, and is not asked about.
+    bed.host.settings.clientId = 'client-b';
+    await assert.rejects(
+      bed.auth.beginSignIn(async () => {
+        throw new Error('asked');
+      }),
+      (error: Error) => error.message !== 'asked',
+    );
+  } finally {
+    http.handler = null;
+    http.requests.length = 0;
+  }
+});
+
+// ─── Where the tokens are kept ───────────────────────────────────────────────
+
+const TOKENS: StoredTokens = {
+  accessToken: 'access',
+  refreshToken: 'refresh',
+  expiresAt: 1,
+  issuer: {
+    wikiUrl: WIKI_A,
+    clientId: 'client-a',
+    tokenEndpoint: 'https://auth-a.example/token',
+    revocationEndpoint: null,
+  },
+};
+
+class FakeSecrets {
+  readonly values = new Map<string, string>();
+  constructor(private readonly keeps = true) {}
+  getSecret(id: string): string | null {
+    return this.values.get(id) ?? null;
+  }
+  setSecret(id: string, secret: string): void {
+    if (this.keeps) this.values.set(id, secret);
+  }
+}
+
+test('tokens in data.json move to secret storage once the copy reads back', () => {
+  const secrets = new FakeSecrets();
+  const store = new TokenStore(secrets);
+  const loaded = store.load({ wikiUrl: WIKI_A, clientId: 'client-a', tokens: TOKENS });
+  assert.deepEqual(loaded.settings.tokens, TOKENS);
+  assert.equal(loaded.rewrite, true);
+  assert.deepEqual(JSON.parse(secrets.getSecret(SECRET_ID) ?? 'null'), TOKENS);
+  assert.equal(store.secure, true);
+
+  // What `saveData` receives has no tokens in it.
+  const saved = store.persist(loaded.settings);
+  assert.equal(saved.tokens, null);
+  assert.deepEqual(loaded.settings.tokens, TOKENS, 'the copy in memory is untouched');
+
+  // The next start reads them back from secret storage alone.
+  const again = new TokenStore(secrets).load(saved);
+  assert.deepEqual(again.settings.tokens, TOKENS);
+  assert.equal(again.rewrite, false);
+
+  // Signing out overwrites the secret, which has no delete.
+  store.persist({ ...loaded.settings, tokens: null });
+  assert.equal(secrets.getSecret(SECRET_ID), '');
+  assert.equal(new TokenStore(secrets).load(saved).settings.tokens, null);
+});
+
+test('tokens stay in data.json when secret storage does not keep them', () => {
+  const store = new TokenStore(new FakeSecrets(false));
+  const loaded = store.load({ tokens: TOKENS });
+  assert.equal(loaded.rewrite, false);
+  assert.deepEqual(loaded.settings.tokens, TOKENS);
+  assert.equal(store.secure, false);
+  assert.deepEqual(store.persist(loaded.settings).tokens, TOKENS);
+});
+
+test('a sign-out that secret storage will not clear is an error, not a silent success', () => {
+  const secrets = new FakeSecrets();
+  const store = new TokenStore(secrets);
+  store.persist({ ...DEFAULT_SETTINGS, tokens: TOKENS });
+  // From here on the stored value no longer changes.
+  secrets.setSecret = () => undefined;
+  assert.throws(() => store.persist({ ...DEFAULT_SETTINGS, tokens: null }));
+});
+
+test('without secret storage the tokens stay in data.json', () => {
+  const store = new TokenStore(null);
+  const loaded = store.load({ tokens: TOKENS });
+  assert.equal(store.secure, false);
+  assert.equal(loaded.rewrite, false);
+  assert.deepEqual(store.persist(loaded.settings).tokens, TOKENS);
+
+  const legacy = new TokenStore(null).load({ tokens: { accessToken: 'a', refreshToken: 'r', expiresAt: 1 } });
+  assert.equal(legacy.settings.tokens?.issuer, null);
+  assert.equal(legacy.rewrite, false);
+});
+
+test('tokens an earlier version stored move to secret storage too, still without an issuer', () => {
+  const secrets = new FakeSecrets();
+  const store = new TokenStore(secrets);
+  const migrated = store.load({ tokens: { accessToken: 'a', refreshToken: 'r', expiresAt: 1 } });
+  assert.deepEqual(migrated.settings.tokens, { accessToken: 'a', refreshToken: 'r', expiresAt: 1, issuer: null });
+  assert.equal(migrated.rewrite, true);
+  assert.equal(store.persist(migrated.settings).tokens, null);
+  assert.equal(JSON.parse(secrets.getSecret(SECRET_ID) ?? 'null').refreshToken, 'r');
+});
+
+test('saving the settings while signed out does not touch secret storage', () => {
+  let writes = 0;
+  const secrets = new FakeSecrets();
+  const store = new TokenStore(secrets);
+  secrets.setSecret = () => {
+    writes += 1;
+    throw new Error('secret storage is broken');
+  };
+  const loaded = store.load({ wikiUrl: WIKI_A });
+  // Every keystroke in a settings field is a save; none of them fails or writes.
+  for (let keystroke = 0; keystroke < 5; keystroke += 1) {
+    assert.equal(store.persist(loaded.settings).tokens, null);
+  }
+  assert.equal(writes, 0);
 });

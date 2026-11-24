@@ -9,6 +9,7 @@ import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 
 import type { SpaceSummary } from './api';
 import { AuthError } from './auth';
+import { confirmMove } from './confirm';
 import { t } from './i18n';
 import type SlWikiPlugin from './main';
 import { describeReport } from './report';
@@ -65,7 +66,9 @@ export class SlWikiSettingTab extends PluginSettingTab {
       .setName(t.signInStatusName)
       .setDesc(this.describeSignIn())
       .addButton((button) => {
-        if (this.plugin.auth.signedIn) {
+        // Tokens an earlier version left are signed out of here too, which is
+        // what revokes them when their Wiki can still be confirmed.
+        if (this.plugin.auth.signedIn || this.plugin.auth.legacy) {
           button
             .setButtonText(t.signOutButton)
             .setWarning()
@@ -86,7 +89,7 @@ export class SlWikiSettingTab extends PluginSettingTab {
           .setCta()
           .onClick(async () => {
             await this.run(button.buttonEl, async () => {
-              await this.plugin.auth.beginSignIn();
+              await this.plugin.auth.beginSignIn((from, to) => confirmMove(this.app, from, to));
               new Notice(t.signInInBrowser);
             });
           });
@@ -115,9 +118,11 @@ export class SlWikiSettingTab extends PluginSettingTab {
 
     this.displaySync(containerEl);
 
-    const warning = containerEl.createDiv({ cls: 'slwiki-warning' });
-    warning.createEl('strong', { text: t.tokenWarningTitle });
-    warning.createSpan({ text: t.tokenWarningBody });
+    // Said either way, but only warned about when the tokens are in the vault.
+    const secure = this.plugin.tokens.secure;
+    const warning = containerEl.createDiv(secure ? {} : { cls: 'slwiki-warning' });
+    warning.createEl('strong', { text: secure ? t.tokenSecureTitle : t.tokenWarningTitle });
+    warning.createSpan({ text: secure ? t.tokenSecureBody : t.tokenWarningBody });
   }
 
   /**
@@ -189,6 +194,32 @@ export class SlWikiSettingTab extends PluginSettingTab {
           }),
         );
 
+      // A space paused on its first cycle because its folder already holds
+      // something. Importing sends what is in that folder to the space, so it
+      // is asked here, for that folder by name, and never assumed.
+      const awaiting = this.plugin.sync.awaiting.get(space.spaceId);
+      if (selected.has(space.spaceId) && awaiting !== undefined) {
+        new Setting(containerEl)
+          .setClass('slwiki-sub-setting')
+          .setName(t.adoptName)
+          .setDesc(t.adoptDesc(awaiting))
+          .addButton((button) =>
+            button
+              .setButtonText(t.adoptButton)
+              .setWarning()
+              .onClick(async () => {
+                await this.run(button.buttonEl, async () => {
+                  this.plugin.settings.adoptFolders = {
+                    ...this.plugin.settings.adoptFolders,
+                    [space.spaceId]: awaiting,
+                  };
+                  await this.plugin.saveSettings();
+                  await this.plugin.runSync('manual');
+                });
+              }),
+          );
+      }
+
       // Offered per space, and only for one that is actually mirrored both
       // ways. Deleting a page in the Wiki is not the same size of decision as
       // unchecking a space: it reaches the reclamation job and the bodies in
@@ -252,6 +283,10 @@ export class SlWikiSettingTab extends PluginSettingTab {
               await this.plugin.state.ensureLoaded();
               this.plugin.state.forget();
               await this.plugin.state.save();
+              // A space without a record asks again before importing a folder
+              // that already holds something, so an earlier answer goes too.
+              this.plugin.settings.adoptFolders = {};
+              await this.plugin.saveSettings();
               new Notice(t.forgotNotice);
             });
           }),
@@ -271,7 +306,10 @@ export class SlWikiSettingTab extends PluginSettingTab {
 
   private describeSignIn(): string {
     const { tokens, identity } = this.plugin.settings;
-    if (tokens === null) return t.signedOutStatus;
+    if (this.plugin.auth.legacy) return t.legacyTokensStatus;
+    const elsewhere = this.plugin.auth.otherIssuer;
+    if (elsewhere !== null) return t.signedInElsewhereStatus(elsewhere);
+    if (tokens === null || !this.plugin.auth.signedIn) return t.signedOutStatus;
     const who = identity === null || identity.username === '' ? t.unknownUser : identity.username;
     const scopes =
       identity === null || identity.scopes.length === 0 ? t.noScopes : identity.scopes.join(' ');

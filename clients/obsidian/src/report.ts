@@ -42,6 +42,11 @@ export type SyncReport = {
   uploaded: number;
 
   failures: string[];
+  /**
+   * Spaces not synced at all this cycle because their folder already holds
+   * something and the user has not yet agreed to import it (`sync.ts`).
+   */
+  paused: { spaceId: string; name: string; folder: string }[];
 };
 
 export const emptyReport = (): SyncReport => ({
@@ -59,9 +64,15 @@ export const emptyReport = (): SyncReport => ({
   deleted: 0,
   uploaded: 0,
   failures: [],
+  paused: [],
 });
 
-/** Whether a cycle did anything the user would want to hear about. */
+/**
+ * Whether a cycle did anything the user would want to hear about.
+ *
+ * A paused space is not counted. It is announced once per session on its own
+ * (`main.ts`), and counting it here would repeat that on every timed cycle.
+ */
 export const worthReporting = (report: SyncReport): boolean =>
   report.fetched +
     report.moved +

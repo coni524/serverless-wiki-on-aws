@@ -374,13 +374,16 @@ async function resolveAccess(context: BlocksContext): Promise<Access> {
  * it is an identifier that did not come from a session. Refusing is the
  * fail-closed reading.
  */
-export async function accessForUser(userSub: string): Promise<Access> {
+export async function accessForUser(
+  userSub: string,
+  gate?: AccessGate,
+): Promise<Access> {
   if (userSub === '') forbidden('Unknown user');
   const epoch = await readEpoch();
   // Hop 1 runs even on a cache hit here, unlike the request path: there is no
   // session to read the display address from, and the profile is what carries it.
   // Hops 2 and 3 are still what the stored answer saves.
-  const own = await valuesOf(table.query({ where: { pk: { equals: userPk(userSub) } } }));
+  let own = await valuesOf(table.query({ where: { pk: { equals: userPk(userSub) } } }));
   const profile = own.find((item) => item.type === 'USER');
   if (profile === undefined) forbidden('Unknown user');
   const user: SignedInUser = {
@@ -389,13 +392,30 @@ export async function accessForUser(userSub: string): Promise<Access> {
     identityProvider: profile.identityProvider,
   };
 
-  const cached = cachedWalk(userSub, epoch);
+  // A replaced partition means the gate rewrote edges and moved the epoch after
+  // it was read above, so an answer stored under that epoch may predate the
+  // change: neither use one nor store one.
+  const replaced = gate === undefined ? undefined : await gate(own, profile);
+  const usable = replaced === undefined ? epoch : null;
+  if (replaced !== undefined) own = replaced;
+
+  const cached = cachedWalk(userSub, usable);
   if (cached !== undefined) return accessFrom(user, cached);
 
   const access = await walkGroups(user, own);
-  storeWalk(userSub, epoch, access);
+  storeWalk(userSub, usable, access);
   return access;
 }
+
+/**
+ * A check run on the caller's partition between hop 1 and the rest.
+ *
+ * It sees what hop 1 read and may refuse by throwing. Returning a partition
+ * says the gate changed the caller's edges and this is what they now are;
+ * returning nothing says they are as read. The bearer door uses it to bring a
+ * federated account's role groups up to date without reading hop 1 twice.
+ */
+export type AccessGate = (own: Item[], profile: Item) => Promise<Item[] | undefined>;
 
 /**
  * Hops 2 and 3, shared by both entry points. `own` is the user's partition.

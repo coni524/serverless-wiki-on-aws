@@ -150,20 +150,85 @@ const ownAttachment = (target: string): boolean =>
  * one shared space would be reading files out of every other space the reader
  * mirrors, and out of notes that never sync at all.
  *
- * Dropping the leading `!` is the whole repair: the link stays in the note,
+ * Dropping the `!` in front is the whole repair: the link stays in the note,
  * pointing where it pointed and reading as the Wiki renders it, and `readLinks`
  * no longer sees it, so nothing resolves it against the vault and nothing is
  * uploaded. Only the Wiki's own bodies are treated this way. A body read back
  * off disk carries the user's own links, and those are the plugin's business.
+ *
+ * The whole run of `!` goes, not one. `!![](x)` is read as an image starting at
+ * the second `!`, and removing only that one leaves `![](x)` — an embed again.
+ * The body is then read once more, because taking characters out can bring two
+ * pieces of markup together into a new link, and the passes repeat until no
+ * link is left that `keep` does not accept. Every pass removes at least one
+ * character, and the number of passes is bounded besides; a body that still
+ * has such a link at the end is refused (null) rather than written.
  */
-function disarm(body: string): string {
-  const links = readLinks(body);
-  if (links.every((link) => ownAttachment(link.target))) return body;
-  return rewrite(body, links, (index) => {
-    const link = links[index];
-    // `readLinks` reads `![…](…)` and `![[…]]`; both start with the `!`.
-    return ownAttachment(link.target) ? null : body.slice(link.start + 1, link.end);
-  });
+function disarm(body: string, keep: (link: Link) => boolean): string | null {
+  let current = body;
+  for (let pass = 0; pass < MAX_DISARM_PASSES; pass += 1) {
+    const foreign = readLinks(current).filter((link) => !keep(link));
+    if (foreign.length === 0) return current;
+    // `readLinks` reads `![…](…)` and `![[…]]`; both start with the `!`. Each
+    // cut runs from the first `!` of the run to the one the link starts with,
+    // and two links can share a run, so the cuts are merged as they are made.
+    const cuts = foreign.map((link) => {
+      let from = link.start;
+      while (from > 0 && current[from - 1] === '!') from -= 1;
+      return { from, to: link.start + 1 };
+    });
+    let out = '';
+    let done = 0;
+    for (const cut of cuts.sort((left, right) => left.from - right.from)) {
+      if (cut.to <= done) continue;
+      out += current.slice(done, Math.max(cut.from, done));
+      done = cut.to;
+    }
+    current = out + current.slice(done);
+  }
+  return readLinks(current).every(keep) ? current : null;
+}
+
+/** How many times `disarm` reads a body again before giving up on it. */
+const MAX_DISARM_PASSES = 16;
+
+/**
+ * A note the plugin wrote from the Wiki, with every picture link it cannot
+ * account for made a plain link.
+ *
+ * For a note an earlier version wrote and the user has not touched since: its
+ * text is the Wiki's, rendered, and the links the rendering put there are the
+ * ones the record names. Any other picture link came from the Wiki's text and
+ * would have been disarmed by this version. Null when it cannot be done.
+ */
+export function disarmWritten(
+  context: AttachmentContext,
+  body: string,
+  notePath: string,
+  known: AttachmentFiles,
+  writtenFor: string = notePath,
+): string | null {
+  return disarm(body, (link) => identify(context, link, [writtenFor, notePath], known) !== null);
+}
+
+/**
+ * A note the user has edited, with the picture links that came from the Wiki
+ * made plain links and every other one left alone.
+ *
+ * `targets` is what `wikiTargets` read from the Wiki's copy of the page. A
+ * link the user pasted keeps working unless it happens to name one of them.
+ */
+export function disarmTargets(body: string, targets: ReadonlySet<string>): string | null {
+  return disarm(body, (link) => !targets.has(link.target));
+}
+
+/** The targets of the picture links in a Wiki body that are not its own attachments. */
+export function wikiTargets(body: string): Set<string> {
+  return new Set(
+    readLinks(body)
+      .filter((link) => !ownAttachment(link.target))
+      .map((link) => link.target),
+  );
 }
 
 export type VaultBodyResult = {
@@ -215,7 +280,10 @@ export async function toVaultBody(
   writtenFor: string = notePath,
   origin: BodyOrigin = 'vault',
 ): Promise<VaultBodyResult> {
-  const source = origin === 'wiki' ? disarm(body) : body;
+  const source = origin === 'wiki' ? disarm(body, (link) => ownAttachment(link.target)) : body;
+  // Refused whole rather than written with a link that could still upload a
+  // file from this vault. The caller reports it against the page.
+  if (source === null) throw new Error(t.unsafePictureLinks);
   const result: VaultBodyResult = { body: source, files: {}, fetched: 0, pending: [], failures: [] };
   const links = readLinks(source);
   if (links.length === 0) return result;
@@ -235,12 +303,25 @@ export async function toVaultBody(
   result.fetched = placed.fetched;
   result.pending = placed.pending;
 
+  const written = new Set<string>();
   result.body = rewrite(source, links, (index) => {
     const id = named.get(index);
     if (id === undefined) return null;
     const path = lookup(files, id);
-    return path === undefined ? null : markdownLink(links[index].alt, relativeTo(notePath, path));
+    if (path === undefined) return null;
+    const target = relativeTo(notePath, path);
+    written.add(target);
+    return markdownLink(links[index].alt, target);
   });
+  // The links written just now point at this page's own downloads. Checked
+  // once more on the finished text, so that nothing the rewriting put next to
+  // the Wiki's text can read as a link to anything else.
+  if (
+    origin === 'wiki' &&
+    !readLinks(result.body).every((link) => ownAttachment(link.target) || written.has(link.target))
+  ) {
+    throw new Error(t.unsafePictureLinks);
+  }
   // Only the ids this body still names are kept, so a picture removed from the
   // body stops being the plugin's business — the file stays where it is and the
   // attachment stays in the Wiki, which holds attachments a body never shows.

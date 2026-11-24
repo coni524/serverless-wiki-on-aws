@@ -12,7 +12,7 @@ import { excerptOf, queryPhrases } from '../../cdk-blocks/search-excerpt.js';
 
 /** The emphasized substrings, in order — what a reader would see in bold. */
 const emphasized = (text: string, query: string): string[] => {
-  const { snippet, highlights } = excerptOf(text, query);
+  const { snippet, highlights } = excerptOf(text, queryPhrases(query));
   return highlights.map(([start, end]) => snippet.slice(start, end));
 };
 
@@ -35,7 +35,7 @@ test('a single character is a phrase, since the analyzer can match it', () => {
 // ─── excerptOf ───────────────────────────────────────────────────────────────
 
 test('a hit is emboldened where the phrase occurs', () => {
-  const { snippet, highlights } = excerptOf('EventBridge のルールを止める', 'eventbridge');
+  const { snippet, highlights } = excerptOf('EventBridge のルールを止める', queryPhrases('eventbridge'));
   assert.equal(snippet, 'EventBridge のルールを止める');
   assert.deepEqual(highlights, [[0, 'EventBridge'.length]]);
 });
@@ -54,7 +54,7 @@ test('every occurrence inside the window is emphasized', () => {
 
 test('a long text is windowed around the first hit, with ellipses at the cuts', () => {
   const text = `${'あ'.repeat(300)}目印${'い'.repeat(300)}`;
-  const { snippet, highlights } = excerptOf(text, '目印');
+  const { snippet, highlights } = excerptOf(text, queryPhrases('目印'));
   assert.ok(snippet.startsWith('…'));
   assert.ok(snippet.endsWith('…'));
   assert.ok(snippet.length < 220);
@@ -65,7 +65,7 @@ test('a long text is windowed around the first hit, with ellipses at the cuts', 
 });
 
 test('text before the window head is not cut when the hit is early', () => {
-  const { snippet } = excerptOf('目印のあとに続く本文', '目印');
+  const { snippet } = excerptOf('目印のあとに続く本文', queryPhrases('目印'));
   assert.ok(!snippet.startsWith('…'));
 });
 
@@ -74,7 +74,7 @@ test('whitespace runs collapse without shifting the highlight offsets', () => {
 });
 
 test('no phrase found falls back to the head of the text with no highlights', () => {
-  const { snippet, highlights } = excerptOf('関係のない本文がここにある', 'kafka');
+  const { snippet, highlights } = excerptOf('関係のない本文がここにある', queryPhrases('kafka'));
   assert.equal(highlights.length, 0);
   assert.ok(snippet.startsWith('関係のない'));
 });
@@ -86,4 +86,10 @@ test('a single-character query is emboldened where it occurs', () => {
 test('overlapping phrase occurrences merge into one range', () => {
   // Query phrases 東京 and 京都 overlap nowhere, but 東京 and 東京タワー do.
   assert.deepEqual(emphasized('東京タワーの案内', '東京タワー 東京'), ['東京タワー']);
+});
+
+test('no phrases at all yields the head of the text, as the search fallback uses', () => {
+  const { snippet, highlights } = excerptOf('関係のない本文がここにある', []);
+  assert.equal(highlights.length, 0);
+  assert.equal(snippet, '関係のない本文がここにある');
 });

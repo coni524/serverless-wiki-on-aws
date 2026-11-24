@@ -14,7 +14,7 @@ Two-way sync between an Obsidian vault and the [serverless-wiki-on-aws](../../RE
 
 ## Prerequisites
 
-- Obsidian 1.5.0 or later
+- Obsidian 1.5.0 or later (1.11.4 or later keeps the sign-in tokens out of the vault; see [Tokens](#tokens))
 - A deployed wiki, its address, and the `McpClientId` stack output
 - Node.js 24 and pnpm 11 to build the plugin
 
@@ -52,7 +52,8 @@ You do not enter a sign-in address: the plugin reads `/.well-known/oauth-authori
 
 - **Both sides edited a page** — the plugin keeps your version as `Title (conflict <date> <time>).md` in the same folder and writes the wiki's body over the original. The same applies when the two sides disagree about where a note belongs.
 - **A note only one side has** — the plugin creates it on the other side.
-- **A vault that already has notes** — the first cycle applies the rules above rather than pushing everything as new pages.
+- **A vault that already has a folder with the space's name** — if it holds anything when the space is synced for the first time (or after "Clear the sync record"), the plugin pauses that space and sends nothing. A notice says so, and the settings tab shows **Import the existing folder** under the space. Once you press it, the next cycle imports the folder: notes at the same place and name as wiki pages are matched by the rules above, and every other note and folder in it is sent to the space as a new page. An empty folder is used without asking.
+- **A space renamed on the wiki** — the plugin renames the space's folder before sending anything. If a folder with the new name already exists, the space is skipped and reported until you rename that folder; the plugin never sends the notes of a folder it did not create for the space.
 
 ## What it does not sync
 
@@ -65,7 +66,15 @@ Pages deleted on the wiki are moved to the vault's `.trash`.
 
 ## Tokens
 
-The access and refresh tokens are stored in plain text in `<vault>/.obsidian/plugins/slwiki-sync/data.json`, which is the only place Obsidian gives a plugin. If your vault sits on another sync service such as iCloud, the tokens are copied there too. Signing out from the settings tab revokes the refresh token at Cognito.
+On Obsidian 1.11.4 or later, the access and refresh tokens are kept in Obsidian's secret storage, which is per vault and outside the vault folder, and `data.json` is written without them. Tokens an earlier version of the plugin left in `data.json` are moved there on the next start, and removed from `data.json` only after the copy reads back.
+
+On an older Obsidian there is no secret storage, so the tokens stay in plain text in `<vault>/.obsidian/plugins/slwiki-sync/data.json`, and the settings tab warns about it. If your vault sits on another sync service such as iCloud, the tokens are copied there too.
+
+The tokens are tied to the Wiki URL and client ID they were issued for, and to the sign-in endpoints the Wiki published at the time. Those endpoints must all be `https` on one origin, or the plugin refuses to sign in. If you change the Wiki URL or the client ID, the plugin treats you as signed out and sends the tokens nowhere — not to the new address, not even to revoke them. Put the old address back, or sign in again only if you trust the new address. Signing in at a new address with the same client ID first shows both addresses and asks you to confirm, because a Wiki that really moved normally gets a new client ID too.
+
+Tokens saved by an earlier version of the plugin were stored without that record. On the first sync after updating, the plugin attaches the Wiki URL and client ID currently in the settings to them, after checking that Wiki's sign-in endpoints as above, and from then on treats them like any other sign-in. Until that succeeds they are kept but not used; signing out then tries the same check, revokes them if it passes, and removes them either way.
+
+Signing out from the settings tab revokes the refresh token at Cognito.
 
 ## Development
 
@@ -75,4 +84,4 @@ pnpm run dev     # rebuild on change
 pnpm run test    # run one sync cycle against a simulated vault and wiki
 ```
 
-`pnpm run test` drives the real sync engine, with `test/wiki.ts` standing in for the network and `test/vault.ts` for the disk. The cases are the ones where a mistake costs the most: folder renames from both sides, deletion with contents, and the cycle right after a migration — a cycle that can delete has to read "the user deleted this" correctly.
+`pnpm run test` drives the real sync engine, with `test/wiki.ts` standing in for the network and `test/vault.ts` for the disk. The cases are the ones where a mistake costs the most: folder renames from both sides, deletion with contents, and the cycle right after a migration — a cycle that can delete has to read "the user deleted this" correctly. The same file also covers what must never leave the vault: image embeds in wiki bodies, a space renamed onto an existing folder, a first sync into a non-empty folder, tokens after the Wiki URL changes, and the move of tokens into secret storage.

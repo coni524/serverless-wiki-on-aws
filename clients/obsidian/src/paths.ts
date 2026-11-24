@@ -246,6 +246,13 @@ const QUARANTINE = /\s\(conflict \d{4}-\d{2}-\d{2} \d{4}(?: \d+)?\)$/;
 /** Whether a note is one this plugin set aside rather than one to send. */
 export const isQuarantinePath = (path: string): boolean => QUARANTINE.test(stemOf(path));
 
+/** The note a conflict copy was set aside from: the same folder, the suffix gone. */
+export const quarantineOrigin = (path: string): string => {
+  const name = `${stemOf(path).replace(QUARANTINE, '')}.md`;
+  const folder = dirname(path);
+  return folder === '' ? name : `${folder}/${name}`;
+};
+
 const two = (value: number): string => String(value).padStart(2, '0');
 
 /** A note's file name without its extension — the title as the user typed it. */

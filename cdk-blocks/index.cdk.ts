@@ -520,6 +520,17 @@ setBackendEnv('MCP_USER_POOL_ID', userPool.userPoolId);
 setBackendEnv('MCP_CLIENT_ID', mcpClient.userPoolClientId);
 setBackendEnv('MCP_AUTH_DOMAIN', mcpDomain.baseUrl());
 
+// The bearer door reads a federated account's IdP groups back from the pool
+// (`bearer-auth.ts`), because an access token does not carry them. Read-only,
+// and only on this pool. The role is shared with the assistant's AgentCore
+// Runtime, which therefore holds the same read; nothing there calls it.
+blocksStack.executionRole.addToPrincipalPolicy(
+  new cdk.aws_iam.PolicyStatement({
+    actions: ['cognito-idp:AdminGetUser'],
+    resources: [userPool.userPoolArn],
+  }),
+);
+
 // The address clients actually reach, stated rather than inferred (see
 // `PUBLIC_ORIGIN` in `bearer-auth.ts`). Behind the CloudFront door `Hosting`
 // creates, the request already carries the address the client called; what it

@@ -1,107 +1,112 @@
-# serverless-wiki-on-aws
+<p align="center">
+  <img src="assets/readme/hero.svg" width="100%" alt="serverless-wiki-on-aws: a Markdown wiki that lives in your own AWS account. Edit in the browser, in Obsidian, or through Claude; one permission check guards all three. Nothing runs while nobody is reading.">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Node.js](https://img.shields.io/badge/Node%2Ejs-24-5FA04E?logo=nodedotjs&logoColor=white)
-![pnpm](https://img.shields.io/badge/pnpm-11-F69220?logo=pnpm&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
-![AWS](https://img.shields.io/badge/AWS-Serverless-232F3E?logo=amazonwebservices&logoColor=white)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/AWS-Serverless-232F3E?logo=amazonwebservices&logoColor=white" alt="AWS Serverless">
+  <img src="assets/readme/badge-obsidian.svg" alt="Obsidian two-way sync">
+  <img src="assets/readme/badge-mcp.svg" alt="MCP with OAuth 2.1">
+  <img src="https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white" alt="Node.js 24">
+  <img src="https://img.shields.io/badge/pnpm-11-F69220?logo=pnpm&logoColor=white" alt="pnpm 11">
+</p>
 
-**English** | [日本語](README.ja.md)
+<p align="center">
+  <a href="#try-it-on-your-laptop">Try it locally</a> ·
+  <a href="#what-you-get">Features</a> ·
+  <a href="#how-it-fits-together">How it works</a> ·
+  <a href="#deploy-to-aws">Deploy</a> ·
+  <a href="#reference">Reference</a> ·
+  <b>English</b> | <a href="README.ja.md">日本語</a>
+</p>
 
-A Markdown wiki that runs on AWS. The browser UI, the Amazon Bedrock assistant, MCP clients, and the Obsidian sync plugin read and write the same pages through the same space permission check, resolved in the API layer on every request.
+## How it fits together
 
+![How it fits together: the browser UI, Obsidian, and AI clients over MCP all pass one permission check, then reach Lambda, DynamoDB, S3, S3 Vectors, Bedrock and Cognito in your own AWS account](assets/readme/how-it-fits.svg)
+
+The browser UI, the Amazon Bedrock assistant, MCP clients, and the Obsidian sync plugin read and write the same pages through the same space permission check, resolved in the API layer on every request.
+Everything runs and stores its data inside the operator's own AWS account, and there are no always-on, always-billing resources.
 The deployed stack is Lambda, API Gateway, DynamoDB, S3, S3 Vectors, CloudFront, Cognito, SQS, and Bedrock, including a Bedrock AgentCore Runtime that runs the AI assistant.
+
+The full diagram, with every service and arrow, is under [Reference](#reference).
+
+## What you get
+
+<table>
+<tr>
+<td width="33%" valign="top">
+<img src="assets/readme/icon-sync.svg" width="40" height="40" alt=""><br>
+<b>Two-way Obsidian sync</b><br>
+Each space becomes a folder in your vault. Notes, folders and pasted images travel both ways.
+</td>
+<td width="33%" valign="top">
+<img src="assets/readme/icon-ai.svg" width="40" height="40" alt=""><br>
+<b>An AI that asks first</b><br>
+The Bedrock assistant searches the wiki, answers from what it finds, and shows a diff. Nothing is written until you approve.
+</td>
+<td width="33%" valign="top">
+<img src="assets/readme/icon-search.svg" width="40" height="40" alt=""><br>
+<b>Search by meaning and by words</b><br>
+S3 Vectors hybrid search: one query, one ranking, highlighted excerpts, and suggestions as you type.
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+<img src="assets/readme/icon-sso.svg" width="40" height="40" alt=""><br>
+<b>Sign in your way</b><br>
+Email with TOTP, or any OIDC provider: Microsoft Entra ID, Okta, OneLogin, Auth0, Keycloak.
+</td>
+<td width="33%" valign="top">
+<img src="assets/readme/icon-idle.svg" width="40" height="40" alt=""><br>
+<b>Nothing runs while idle</b><br>
+Lambda, DynamoDB and S3. You pay for requests, storage and AI tokens, not for waiting.
+</td>
+<td width="33%" valign="top">
+<img src="assets/readme/icon-lang.svg" width="40" height="40" alt=""><br>
+<b>Japanese and English</b><br>
+Switch the UI language from the header. Japanese full-text search is built in.
+</td>
+</tr>
+</table>
+
+Also in the box:
+
+- Markdown pages arranged in a folder-and-page tree, one tree per space
+- Map an identity provider's group to a role group, and permissions are updated to match the IdP's groups on every sign-in. Password sign-in keeps working alongside it
+- An MCP (Model Context Protocol) server at `POST /mcp`, authenticated with OAuth 2.1 through Cognito, for Claude and other MCP clients
+- Space-level permissions resolved in the API layer on every request. Sign-up is closed: an operator creates accounts, and no API raises anyone's own permissions
+- Attachments delivered through presigned URLs; the bucket blocks all public access
+- The assistant's default model is Amazon Nova 2 Lite; set `AI_MODEL_ID` to use another Bedrock model
+- Infrastructure defined with [AWS CDK Blocks](https://www.npmjs.com/package/aws-cdk-blocks), an Infrastructure-from-Code framework
 
 ![A page in the wiki: the folder-and-page tree of the space on the left, the rendered Markdown on the right](assets/screenshot-page.png)
 
-*Reading a page.*
+*Reading a page. More screens are under [Reference](#reference).*
 
-## Design principles
-
-- Everything runs and stores its data inside the operator's own AWS account
-- There are no always-on, always-billing resources
-- It syncs both ways with Obsidian on your machine
-- The Bedrock assistant and the MCP server go through the same permission check as the UI
-- Built with AWS CDK Blocks
-
-## Features
-
-- Markdown pages arranged in a folder-and-page tree, one tree per space
-- Space-level permissions resolved on every request in the API layer
-- Sign-in is a Cognito email address, and TOTP multi-factor authentication is required of every account. Sign-up is closed: an operator creates accounts, and no API raises anyone's own permissions
-- Sign-in through an identity provider (IdP) as well. Any OIDC provider works from the same settings — Okta, OneLogin, Auth0, Microsoft Entra, Keycloak. Map an IdP group to a role group and permissions are updated to match the IdP's groups on every sign-in. Password sign-in keeps working alongside it
-- AI assistant on Amazon Bedrock: it searches the wiki, answers from what it finds, and edits pages only after you approve the change. The default model is Amazon Nova 2 Lite; set `AI_MODEL_ID` to use another Bedrock model
-- Search uses the hybrid search of S3 Vectors: one query finds pages by meaning (Titan Text Embeddings V2) and by words (full-text search with the Japanese analyzer), and S3 Vectors fuses the two into one ranking. Results carry a highlighted excerpt, and suggestions appear as you type
-- MCP (Model Context Protocol) server at `POST /mcp`, authenticated with OAuth 2.1 through Cognito, for Claude and other MCP clients
-- Obsidian plugin that syncs a vault and a space in both directions
-- Attachments delivered through presigned URLs; the bucket blocks all public access
-- Japanese and English UI, switched in the header
-- Infrastructure defined with [AWS CDK Blocks](https://www.npmjs.com/package/aws-cdk-blocks), an Infrastructure-from-Code framework
-
-## Architecture
-
-![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and searches with S3 Vectors; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
-
-*Solid arrows are the request path; dashed arrows are asynchronous or background flows.*
-
-## Screens
-
-![The space list, one card per space, each showing the permission the signed-in account holds](assets/screenshot-spaces.png)
-
-*The space list. The badge on each card is the permission the signed-in account holds on that space.*
-
-![Search results, one card per page, each showing the space it belongs to and a matching excerpt](assets/screenshot-search.png)
-
-*Search results.*
-
-![A page with the AI assistant open on the right, answering a question from the page content](assets/screenshot-ai-ask.png)
-
-*Asking the AI assistant a question.*
-
-![The review-change view: the Markdown of a new page shown as an all-added diff, with an approval prompt in the assistant panel](assets/screenshot-ai-create.png)
-
-*Asking the assistant to create a page. Nothing is written to the wiki until you approve the change.*
-
-![The review-change view: within the full page body, the removed line in red and the replacement line in green, with the changed characters highlighted](assets/screenshot-ai-diff.png)
-
-*An edit to an existing page appears as a diff before approval.*
-
-## Prerequisites
-
-- [Node.js 24](https://nodejs.org/) and [pnpm 11](https://pnpm.io/) (npm is not supported; `mise install` picks up both from `mise.toml`)
-- To deploy: an AWS account, [AWS CLI 2.32.0+](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), and Bedrock model access for Amazon Nova 2 Lite and Titan Text Embeddings V2
-- The CloudFormation stack deploys to the region your AWS CLI profile specifies. It has been tested in `ap-northeast-1` (Tokyo); the region you pick must offer S3 Vectors, Bedrock AgentCore Runtime, and the two Bedrock models above
-
-## Quick Start
+## Try it on your laptop
 
 No AWS account is needed. Every Building Block runs mocked on your machine, and the mock data lands in `.cdk-blocks/local/data/`.
+You need [Node.js 24](https://nodejs.org/) and [pnpm 11](https://pnpm.io/) (npm is not supported; `mise install` picks up both from `mise.toml`).
 
 ```bash
 pnpm install
-pnpm run dev
-```
-
-**Open your browser:** Navigate to [http://localhost:3000](http://localhost:3000).
-
-Sign-up is closed here too, as on a deployed stack, so create your local account first, with the dev server stopped (it rewrites the local data files). Without `--password`, a password is generated and printed. The first sign-in asks you to set up an authenticator app; the local pool accepts any 6 digits.
-
-```bash
-# Ctrl-C the dev server, then
-pnpm run local:add-user -- --email you@example.test
-pnpm run dev
-```
-
-Permission checks work as in production, so a brand-new account belongs to no group and sees no spaces. After your first sign-in, make yourself an administrator the same way a real deployment does, again with the dev server stopped.
-
-```bash
-# Ctrl-C the dev server, then
+pnpm run local:add-user -- --email you@example.test   # prints a generated password
+pnpm run dev                                          # open http://localhost:3000 and sign in once
+# stop the dev server with Ctrl-C, then make yourself an administrator
 pnpm run seed-admin -- --local --email you@example.test
 pnpm run dev
 ```
 
+Sign-up is closed here too, as on a deployed stack, which is why you create the account first.
+Run `local:add-user` and `seed-admin` with the dev server stopped, because it rewrites the local data files.
+Add `--password` to `local:add-user` to choose the password yourself.
+The first sign-in asks you to set up an authenticator app; the local pool accepts any 6 digits.
+Permission checks work as in production, so a new account sees no spaces until `seed-admin` makes it an administrator.
 Only the assistant differs: it talks to a mock model that replies with fixed text.
 
 ## Deploy to AWS
+
+You need an AWS account, [AWS CLI 2.32.0+](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), and Bedrock model access for Amazon Nova 2 Lite and Titan Text Embeddings V2.
 
 ```bash
 aws login --profile <profile>
@@ -110,7 +115,10 @@ pnpm run deploy
 
 The first deploy runs twice, and `pnpm run deploy` runs the second pass itself: it sets the CloudFront address created by the first pass into the Lambda's environment variables. Once the address exists, a deploy runs once.
 
-### The first account
+<details>
+<summary><b>Create the first account and administrator</b></summary>
+
+#### The first account
 
 Create the first account yourself in the Cognito user pool. The password has to be 12 characters or longer and carry an upper-case letter, a lower-case letter, a digit, and a symbol.
 
@@ -136,7 +144,7 @@ aws cognito-idp admin-set-user-password \
 
 The pool requires MFA and offers TOTP as the only factor, so the first sign-in in the browser presents an enrolment challenge: scan the QR code with an authenticator app and enter the six-digit code it shows. Every later sign-in asks for a code.
 
-### The first administrator
+#### The first administrator
 
 Sign in once in the browser first. That sign-in creates your profile record and determines the Cognito `sub` (your user identifier) the next step uses. Then register yourself as an administrator in the permission table — its name starts with the stack id and ends in `-permissions`.
 
@@ -145,34 +153,14 @@ aws dynamodb list-tables --profile <profile> --region <region>
 AWS_PROFILE=<profile> pnpm run seed-admin -- --table <table-name> --email you@example.com
 ```
 
+`--email` chooses a password account, and only when exactly one has that address. A federated (IdP) account is never chosen by address, because its address is whatever its IdP asserted. To make one an administrator, for example to recover after an IdP misconfiguration locks every administrator out, confirm in the Cognito console that the user (named `<registration name>_<sub at the IdP>`) is the right person, then pass its `sub` in place of the address: `--sub <sub>`. The script prints the account's address and sign-in method before it writes anything, and stops with a list of candidates when the address does not settle which account is meant.
+
 Every administrator after the first one is added by an administrator, from the admin screens.
 
-### Sandbox
+</details>
 
-`pnpm run sandbox` puts the backend on AWS and leaves the frontend on your machine. The frontend origin is not set automatically, so pass it as an environment variable.
-
-```bash
-CORS_ALLOWED_ORIGINS=http://localhost:3000 pnpm run sandbox
-```
-
-### Teardown
-
-```bash
-pnpm run sandbox:destroy   # the sandbox stack, data and all
-pnpm run destroy           # the deployed stack
-```
-
-`pnpm run sandbox:destroy` deletes the tables and buckets together with the stack. `pnpm run destroy` keeps the DynamoDB table, the content bucket, and the search vector bucket. They bill for storage until the operator deletes them manually.
-
-## Configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `CORS_ALLOWED_ORIGINS` | read from the stack output by `pnpm run deploy` | Comma-separated origins the S3 bucket accepts presigned-URL requests from. Without a match, attachments fail in the browser. Set it explicitly when a custom domain sits in front of CloudFront or several origins serve the app. Wildcards are rejected. |
-| `MCP_PUBLIC_ORIGIN` | read from the stack output by `pnpm run deploy` | The origin the MCP OAuth metadata advertises. Set it explicitly for a custom domain. |
-| `AI_MODEL_ID` | `global.amazon.nova-2-lite-v1:0` | The Bedrock model the assistant talks to. Amazon Nova 2 Lite through its Global inference profile is the default. `jp.amazon.nova-2-lite-v1:0` keeps inference inside Japan; `global.anthropic.claude-sonnet-4-6` and `global.anthropic.claude-sonnet-5` select tools better and cost more. Whichever you name, enable model access for it in Bedrock first — passing the variable does not grant it. Read at run time, so an unset or empty value falls back to the default rather than failing. |
-
-### Signing in with your identity provider
+<details>
+<summary><b>Sign in with your identity provider (OIDC)</b></summary>
 
 The settings are the same for every OIDC provider.
 For Microsoft Entra ID, the appendix [`guides/sso-entra-id.md`](guides/sso-entra-id.md) walks through the actual screens; [`guides/sso-onelogin.md`](guides/sso-onelogin.md) does the same for OneLogin. The IdP is registered on the wiki's own Cognito user pool, so federated users become pool users too: everyone is identified by the pool's `sub`, and federated users can use MCP and the sync API as well.
@@ -218,7 +206,10 @@ Password sign-in stays enabled, so a misconfigured IdP does not lock out the per
 
 SAML is not supported.
 
-### MCP clients
+</details>
+
+<details>
+<summary><b>Connect Claude and other MCP clients</b></summary>
 
 Copy `.mcp.json.example` to `.mcp.json` and fill in the CloudFront domain and the `McpClientId` stack output.
 
@@ -227,11 +218,93 @@ aws cloudformation describe-stacks --stack-name <stack-name> --profile <profile>
   --query 'Stacks[0].Outputs[?OutputKey==`McpClientId`].OutputValue' --output text
 ```
 
-### Obsidian sync
+</details>
+
+<details>
+<summary><b>Set up Obsidian sync</b></summary>
 
 The bundled plugin in `clients/obsidian/` syncs an Obsidian vault with the spaces you can read. When the two sides disagree, the wiki's version takes precedence: the plugin backs up your local copy, then overwrites it with the wiki's version. Setup and usage are in [clients/obsidian/README.md](clients/obsidian/README.md).
 
-## Project Structure
+</details>
+
+<details>
+<summary><b>Configuration variables</b></summary>
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CORS_ALLOWED_ORIGINS` | read from the stack output by `pnpm run deploy` | Comma-separated origins the S3 bucket accepts presigned-URL requests from. Without a match, attachments fail in the browser. Set it explicitly when a custom domain sits in front of CloudFront or several origins serve the app. Wildcards are rejected. |
+| `MCP_PUBLIC_ORIGIN` | read from the stack output by `pnpm run deploy` | The origin the MCP OAuth metadata advertises. Set it explicitly for a custom domain. |
+| `AI_MODEL_ID` | `global.amazon.nova-2-lite-v1:0` | The Bedrock model the assistant talks to. Amazon Nova 2 Lite through its Global inference profile is the default. `jp.amazon.nova-2-lite-v1:0` keeps inference inside Japan; `global.anthropic.claude-sonnet-4-6` and `global.anthropic.claude-sonnet-5` select tools better and cost more. Whichever you name, enable model access for it in Bedrock first — passing the variable does not grant it. Read at run time, so an unset or empty value falls back to the default rather than failing. |
+
+</details>
+
+<details>
+<summary><b>Region</b></summary>
+
+The CloudFormation stack deploys to the region your AWS CLI profile specifies. It has been tested in `ap-northeast-1` (Tokyo); the region you pick must offer S3 Vectors, Bedrock AgentCore Runtime, and the two Bedrock models above
+
+</details>
+
+<details>
+<summary><b>Sandbox and teardown</b></summary>
+
+#### Sandbox
+
+`pnpm run sandbox` puts the backend on AWS and leaves the frontend on your machine. The frontend origin is not set automatically, so pass it as an environment variable.
+
+```bash
+CORS_ALLOWED_ORIGINS=http://localhost:3000 pnpm run sandbox
+```
+
+#### Teardown
+
+```bash
+pnpm run sandbox:destroy   # the sandbox stack, data and all
+pnpm run destroy           # the deployed stack
+```
+
+`pnpm run sandbox:destroy` deletes the tables and buckets together with the stack. `pnpm run destroy` keeps the DynamoDB table, the content bucket, and the search vector bucket. They bill for storage until the operator deletes them manually.
+
+</details>
+
+## Reference
+
+<details>
+<summary><b>Full architecture diagram</b></summary>
+
+![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and searches with S3 Vectors; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
+
+*Solid arrows are the request path; dashed arrows are asynchronous or background flows.*
+
+</details>
+
+<details>
+<summary><b>More screens</b></summary>
+
+![The space list, one card per space, each showing the permission the signed-in account holds](assets/screenshot-spaces.png)
+
+*The space list. The badge on each card is the permission the signed-in account holds on that space.*
+
+![Search results, one card per page, each showing the space it belongs to and a matching excerpt](assets/screenshot-search.png)
+
+*Search results.*
+
+![A page with the AI assistant open on the right, answering a question from the page content](assets/screenshot-ai-ask.png)
+
+*Asking the AI assistant a question.*
+
+![The review-change view: the Markdown of a new page shown as an all-added diff, with an approval prompt in the assistant panel](assets/screenshot-ai-create.png)
+
+*Asking the assistant to create a page. Nothing is written to the wiki until you approve the change.*
+
+![The review-change view: within the full page body, the removed line in red and the replacement line in green, with the changed characters highlighted](assets/screenshot-ai-diff.png)
+
+*An edit to an existing page appears as a diff before approval.*
+
+</details>
+
+<details>
+<summary><b>Project structure</b></summary>
 
 ```
 serverless-wiki-on-aws/
@@ -251,17 +324,22 @@ serverless-wiki-on-aws/
 │   └── lib/              # Markdown, diff, router, TanStack Query, i18n dictionaries
 ├── clients/obsidian/     # Obsidian sync plugin
 ├── test/                 # End-to-end test across the whole API, and unit tests
-├── assets/               # Screenshots and the architecture diagram used by this README
+├── assets/               # Screenshots, diagrams, and icons used by this README
 └── README.md             # This file
 ```
 
-## Limitations
+</details>
+
+<details>
+<summary><b>Limitations</b></summary>
 
 - **Words match as whole words.** The S3 Vectors Japanese analyzer is used as it is, so part of a word ("マネコ" for "リビアヤマネコ") or a different long-vowel spelling ("サーバ" for "サーバー") does not match, and suggestions appear only once a word is typed in full.
 - **The local dev server searches with a plain substring match.** S3 Vectors has no local stand-in; try the hybrid search on a sandbox.
 - **Raw HTML in a body is not rendered.** Markdown is CommonMark plus GFM — tables, task lists, strikethrough — and a single newline is a line break, but a body's own HTML tags are shown as text rather than parsed. A page embeds only its own attachments as images; every other image target renders as a link. Search excerpts are still plain text, so any Markdown in them appears as written.
 - **Creating the first account requires the AWS CLI.** Right after deploying, create an account in Cognito with the AWS CLI, sign in once, then run `pnpm run seed-admin`.
 - **No audit log or request rate limiting.**
+
+</details>
 
 ## Learn More
 

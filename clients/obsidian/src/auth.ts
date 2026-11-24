@@ -22,11 +22,28 @@
  * sign-in domain never has to be typed in. The client id cannot be: this
  * deployment has no dynamic client registration, and the id differs per stack.
  * It is the `McpClientId` stack output.
+ *
+ * ─── Which Wiki a token belongs to ──────────────────────────────────────────
+ * Tokens are stored with the Wiki URL, the client id and the endpoints they
+ * were issued under (`TokenIssuer`), and nothing here sends a token anywhere
+ * until the settings are found to still name that same Wiki and client. A
+ * changed address reads as "signed out" rather than as somewhere new to send
+ * the old Wiki's tokens, and refresh and revocation go to the endpoints
+ * recorded at sign-in, never to ones a different address advertises. The
+ * tokens are not cleared when the address changes: the settings are saved on
+ * every keystroke, and putting the old address back restores the sign-in.
  */
 import { requestUrl } from 'obsidian';
 
 import { t } from './i18n';
-import { type Identity, type SettingsHost, type StoredTokens, normalizeUrl } from './settings';
+import {
+  type Identity,
+  type SettingsHost,
+  type StoredTokens,
+  type TokenIssuer,
+  connectionOf,
+  issuedFor,
+} from './settings';
 
 /** The action half of the callback URI; must match Cognito's registration. */
 export const PROTOCOL_ACTION = 'slwiki-auth';
@@ -63,7 +80,41 @@ type Pending = {
   verifier: string;
   state: string;
   startedAt: number;
+  /**
+   * The Wiki, client and endpoints the sign-in was started against.
+   *
+   * The answer is exchanged with these and not with what the settings say by
+   * the time the browser comes back, so the code goes to the token endpoint of
+   * the same Wiki that issued it, and the tokens are recorded as that Wiki's.
+   */
+  wikiUrl: string;
+  clientId: string;
+  server: AuthorizationServer;
 };
+
+/**
+ * An access token together with the Wiki it may be sent to.
+ *
+ * Handed out as one value so that a caller cannot pair a token with an address
+ * read from somewhere else (`api.ts`).
+ */
+export type Credential = {
+  wikiUrl: string;
+  accessToken: string;
+};
+
+/** Stored tokens that carry their issuer. */
+type BoundTokens = StoredTokens & { issuer: TokenIssuer };
+
+/**
+ * Asked before signing in to a new address with the client id of the old one.
+ *
+ * Resolves true to go ahead. A Wiki that really moved normally comes with a new
+ * client id as well, so the same id at a different address is worth a second
+ * look: it is also what pasting a look-alike address over the real one looks
+ * like.
+ */
+export type ConfirmMove = (from: string, to: string) => Promise<boolean>;
 
 export class AuthClient {
   /**
@@ -81,7 +132,7 @@ export class AuthClient {
   private discovered: { wikiUrl: string; server: AuthorizationServer } | null = null;
 
   /** The refresh in flight, so concurrent callers wait on one exchange. */
-  private refreshing: Promise<string> | null = null;
+  private refreshing: Promise<Credential> | null = null;
 
   constructor(
     private readonly host: SettingsHost,
@@ -89,20 +140,86 @@ export class AuthClient {
     private readonly onChange: () => void,
   ) {}
 
+  /** Whether there are tokens that may be used with the settings as they stand. */
   get signedIn(): boolean {
-    return this.host.settings.tokens !== null;
+    return this.usable() !== null;
+  }
+
+  /**
+   * The Wiki the stored tokens belong to, when it is not the one the settings
+   * now name — for the settings screen to say why it reads as signed out.
+   */
+  get otherIssuer(): string | null {
+    const tokens = this.host.settings.tokens;
+    if (tokens === null || tokens.issuer === null) return null;
+    if (issuedFor(tokens.issuer, this.host.settings)) return null;
+    return tokens.issuer.wikiUrl;
+  }
+
+  /** Whether the stored tokens are an earlier version's, still without an issuer. */
+  get legacy(): boolean {
+    return this.host.settings.tokens !== null && this.host.settings.tokens.issuer === null;
+  }
+
+  /**
+   * Give tokens an earlier version stored the issuer they were never recorded
+   * with, so they can be used — and revoked.
+   *
+   * That version wrote the tokens and the settings to the same file at the same
+   * time, so the Wiki the settings name is the one they came from unless the
+   * settings were changed under it; and that version would have sent them there
+   * on its next cycle anyway. The endpoints are taken from that Wiki's
+   * discovery document under the same checks a sign-in applies. Returns
+   * whether the tokens now have an issuer; a failure leaves them as they were,
+   * unused, for the next attempt or for a sign-out.
+   */
+  async adoptLegacy(): Promise<boolean> {
+    const tokens = this.host.settings.tokens;
+    if (tokens === null || tokens.issuer !== null) return false;
+    const { wikiUrl, clientId } = connectionOf(this.host.settings);
+    if (wikiUrl === '' || clientId === '') return false;
+    let server: AuthorizationServer;
+    try {
+      server = await this.authorizationServer(wikiUrl);
+    } catch {
+      return false;
+    }
+    // Replaced while discovery was out; whatever is there now is not these.
+    if (this.host.settings.tokens !== tokens) return false;
+    await this.store({
+      ...tokens,
+      issuer: {
+        wikiUrl,
+        clientId,
+        tokenEndpoint: server.tokenEndpoint,
+        revocationEndpoint: server.revocationEndpoint,
+      },
+    });
+    return true;
   }
 
   // ─── The sign-in round trip ────────────────────────────────────────────────
 
-  /** Open the browser at Cognito's sign-in screen. */
-  async beginSignIn(): Promise<void> {
+  /**
+   * Open the browser at Cognito's sign-in screen.
+   *
+   * When the stored tokens came from another address under the same client
+   * id, `confirmMove` is asked first, and nothing is fetched from the new
+   * address unless it says yes.
+   */
+  async beginSignIn(confirmMove: ConfirmMove): Promise<void> {
     const { wikiUrl, clientId } = this.requireConfig();
+    const previous = this.host.settings.tokens?.issuer ?? null;
+    if (previous !== null && previous.clientId === clientId && previous.wikiUrl !== wikiUrl) {
+      if (!(await confirmMove(previous.wikiUrl, wikiUrl))) {
+        throw new AuthError(t.signInMoveDeclined);
+      }
+    }
     const server = await this.authorizationServer(wikiUrl);
 
     const verifier = randomString(64);
     const state = randomString(32);
-    this.pending = { verifier, state, startedAt: Date.now() };
+    this.pending = { verifier, state, startedAt: Date.now(), wikiUrl, clientId, server };
 
     const query = new URLSearchParams({
       response_type: 'code',
@@ -142,8 +259,7 @@ export class AuthClient {
       throw new AuthError(t.signInNoCode);
     }
 
-    const { wikiUrl, clientId } = this.requireConfig();
-    const server = await this.authorizationServer(wikiUrl);
+    const { wikiUrl, clientId, server } = pending;
     const granted = await this.exchange(server.tokenEndpoint, {
       grant_type: 'authorization_code',
       client_id: clientId,
@@ -159,60 +275,95 @@ export class AuthClient {
       accessToken: granted.access_token,
       expiresAt: Date.now() + granted.expires_in * 1000,
       refreshToken: granted.refresh_token,
+      issuer: {
+        wikiUrl,
+        clientId,
+        tokenEndpoint: server.tokenEndpoint,
+        revocationEndpoint: server.revocationEndpoint,
+      },
     });
   }
 
   // ─── Using and renewing the token ──────────────────────────────────────────
 
-  /** A token good for at least the next minute, refreshing if it is not. */
-  async accessToken(): Promise<string> {
-    const tokens = this.host.settings.tokens;
-    if (tokens === null) {
-      throw new AuthError(t.notSignedIn);
+  /**
+   * A token good for at least the next minute, and the Wiki it is for.
+   *
+   * Refreshes first when the token is about to expire. Refuses, sending
+   * nothing, when the stored tokens belong to a Wiki or client other than the
+   * one the settings now name.
+   */
+  async credential(): Promise<Credential> {
+    const tokens = this.requireUsable();
+    if (Date.now() < tokens.expiresAt - REFRESH_MARGIN_MS) {
+      return { wikiUrl: tokens.issuer.wikiUrl, accessToken: tokens.accessToken };
     }
-    if (Date.now() < tokens.expiresAt - REFRESH_MARGIN_MS) return tokens.accessToken;
-    return await this.refresh();
+    return await this.refreshed(tokens.issuer.wikiUrl);
   }
 
   /**
-   * Exchange the refresh token for a new access token.
+   * A new access token for the same Wiki as `previous`.
    *
-   * Also the recovery path for a 401 on a token this plugin still believed in —
-   * a token revoked at Cognito expires early as far as the server is concerned,
-   * and nothing here would know until a request came back refused.
+   * The recovery path for a 401 on a token this plugin still believed in — a
+   * token revoked at Cognito expires early as far as the server is concerned,
+   * and nothing here would know until a request came back refused. The retry
+   * is only ever sent where the first request went: if the settings or the
+   * sign-in changed while the first request was out, this refuses rather than
+   * exchanging one Wiki's refresh token on behalf of a request to another.
    */
-  async refresh(): Promise<string> {
-    if (this.refreshing !== null) return await this.refreshing;
-    this.refreshing = this.runRefresh().finally(() => {
-      this.refreshing = null;
-    });
-    return await this.refreshing;
+  async refreshFor(previous: Credential): Promise<Credential> {
+    const tokens = this.requireUsable();
+    if (tokens.issuer.wikiUrl !== previous.wikiUrl) throw new AuthError(t.notSignedIn);
+    return await this.refreshed(previous.wikiUrl);
   }
 
-  private async runRefresh(): Promise<string> {
-    const tokens = this.host.settings.tokens;
-    if (tokens === null) throw new AuthError(t.notSignedIn);
-    const { wikiUrl, clientId } = this.requireConfig();
-    const server = await this.authorizationServer(wikiUrl);
+  /** Run (or join) a refresh and check it still answers for `wikiUrl`. */
+  private async refreshed(wikiUrl: string): Promise<Credential> {
+    if (this.refreshing === null) {
+      this.refreshing = this.runRefresh().finally(() => {
+        this.refreshing = null;
+      });
+    }
+    const credential = await this.refreshing;
+    // Re-checked after the wait: the settings may have been edited, or another
+    // account signed in, while the exchange was out.
+    if (credential.wikiUrl !== wikiUrl || this.usable()?.issuer.wikiUrl !== wikiUrl) {
+      throw new AuthError(t.notSignedIn);
+    }
+    return credential;
+  }
+
+  private async runRefresh(): Promise<Credential> {
+    const tokens = this.requireUsable();
+    const { issuer } = tokens;
 
     let granted;
     try {
-      granted = await this.exchange(server.tokenEndpoint, {
+      // The endpoint recorded at sign-in, not one discovered now: the address
+      // in the settings is only trusted as far as it matches the issuer, and
+      // the issuer's own endpoint needs no second opinion.
+      granted = await this.exchange(issuer.tokenEndpoint, {
         grant_type: 'refresh_token',
-        client_id: clientId,
+        client_id: issuer.clientId,
         refresh_token: tokens.refreshToken,
       });
     } catch (error: unknown) {
       // A refresh token that Cognito no longer accepts is not a transient
       // failure, and keeping it would make every later call fail the same slow
       // way. Clearing it puts the plugin back in the state whose remedy the
-      // settings screen already offers.
+      // settings screen already offers — unless the tokens were replaced while
+      // the request was out, in which case they are not the ones refused.
       if (error instanceof AuthError && /invalid_grant/.test(error.message)) {
-        await this.store(null);
+        if (this.host.settings.tokens === tokens) await this.store(null);
         throw new AuthError(t.signInExpired);
       }
       throw error;
     }
+
+    // A sign-out or a new sign-in finished while this was out. Storing now
+    // would bring back the tokens the user just got rid of, or overwrite the
+    // ones they just got.
+    if (this.host.settings.tokens !== tokens) throw new AuthError(t.notSignedIn);
 
     // Cognito reissues only the access token here; the refresh token stands
     // until it expires or is revoked, so it is carried across unchanged.
@@ -220,8 +371,9 @@ export class AuthClient {
       accessToken: granted.access_token,
       expiresAt: Date.now() + granted.expires_in * 1000,
       refreshToken: granted.refresh_token ?? tokens.refreshToken,
+      issuer,
     });
-    return granted.access_token;
+    return { wikiUrl: issuer.wikiUrl, accessToken: granted.access_token };
   }
 
   /**
@@ -230,19 +382,23 @@ export class AuthClient {
    * Revocation is attempted first but never allowed to keep the local half from
    * happening: a user pressing "Sign out" wants the token out of their vault,
    * and an unreachable network is not a reason to leave it there.
+   *
+   * Revocation is sent only while the settings still name the Wiki the tokens
+   * came from, and only to the endpoint recorded at sign-in. Tokens from a Wiki
+   * the settings no longer name are forgotten without a word to anyone, since
+   * the only address on hand is one they must not be sent to. Tokens an
+   * earlier version left without an issuer are given one first, if they can
+   * be, so that they are revoked too.
    */
   async signOut(): Promise<void> {
-    const tokens = this.host.settings.tokens;
-    const { wikiUrl, clientId } = this.config();
-    if (tokens !== null && wikiUrl !== '' && clientId !== '') {
+    if (this.legacy) await this.adoptLegacy();
+    const tokens = this.usable();
+    if (tokens !== null && tokens.issuer.revocationEndpoint !== null) {
       try {
-        const server = await this.authorizationServer(wikiUrl);
-        if (server.revocationEndpoint !== null) {
-          await postForm(server.revocationEndpoint, {
-            token: tokens.refreshToken,
-            client_id: clientId,
-          });
-        }
+        await postForm(tokens.issuer.revocationEndpoint, {
+          token: tokens.refreshToken,
+          client_id: tokens.issuer.clientId,
+        });
       } catch {
         // Reported by leaving it out of the message; the local clear is what
         // the user asked for and it always happens.
@@ -253,6 +409,19 @@ export class AuthClient {
 
   // ─── Internals ─────────────────────────────────────────────────────────────
 
+  /** The stored tokens, when the settings still name the Wiki that issued them. */
+  private usable(): BoundTokens | null {
+    const tokens = this.host.settings.tokens;
+    if (tokens === null || tokens.issuer === null) return null;
+    return issuedFor(tokens.issuer, this.host.settings) ? (tokens as BoundTokens) : null;
+  }
+
+  private requireUsable(): BoundTokens {
+    const tokens = this.usable();
+    if (tokens === null) throw new AuthError(t.notSignedIn);
+    return tokens;
+  }
+
   /**
    * The two configured values, tidied at the point of use.
    *
@@ -260,15 +429,8 @@ export class AuthClient {
    * slashes from what someone is still typing turns `https://` into `https:`
    * between two keystrokes.
    */
-  private config(): { wikiUrl: string; clientId: string } {
-    return {
-      wikiUrl: normalizeUrl(this.host.settings.wikiUrl),
-      clientId: this.host.settings.clientId.trim(),
-    };
-  }
-
   private requireConfig(): { wikiUrl: string; clientId: string } {
-    const config = this.config();
+    const config = connectionOf(this.host.settings);
     if (config.wikiUrl === '' || config.clientId === '') {
       throw new AuthError(t.configMissing);
     }
@@ -301,12 +463,19 @@ export class AuthClient {
     if (typeof authorizationEndpoint !== 'string' || typeof tokenEndpoint !== 'string') {
       throw new AuthError(t.discoveryNoEndpoints(url));
     }
-    const server: AuthorizationServer = {
-      authorizationEndpoint,
-      tokenEndpoint,
-      revocationEndpoint:
-        typeof document.revocation_endpoint === 'string' ? document.revocation_endpoint : null,
-    };
+    const revocationEndpoint =
+      typeof document.revocation_endpoint === 'string' ? document.revocation_endpoint : null;
+    // The refresh token is posted to these, so they have to be one
+    // authorization server over TLS: a document that splits them across
+    // origins, or names a plain-http one, is not trusted with it.
+    const endpoints = [authorizationEndpoint, tokenEndpoint, revocationEndpoint].filter(
+      (endpoint): endpoint is string => endpoint !== null,
+    );
+    const origins = new Set(endpoints.map(httpsOrigin));
+    if (origins.has(null) || origins.size !== 1) {
+      throw new AuthError(t.discoveryUntrusted(url));
+    }
+    const server: AuthorizationServer = { authorizationEndpoint, tokenEndpoint, revocationEndpoint };
     this.discovered = { wikiUrl, server };
     return server;
   }
@@ -347,6 +516,16 @@ export class AuthClient {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** The origin of an `https:` URL, or null for anything else. */
+function httpsOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
 
 /** POST an `application/x-www-form-urlencoded` body, without throwing on 4xx. */
 async function postForm(url: string, form: Record<string, string>) {

@@ -36,9 +36,9 @@
  * authorization path this project is built on — a claim cannot become a second
  * way to be permitted.
  */
-import { AppSetting, Auth, getDeploymentType, stubIdp } from 'aws-cdk-blocks';
+import { AppSetting, Auth, KVStoreErrors, getDeploymentType, stubIdp } from 'aws-cdk-blocks';
 import type { AuthenticatedUser, BuiltinProvider } from 'aws-cdk-blocks';
-import { ApiError } from '@aws-cdk-blocks/core';
+import { ApiError, isBlocksError } from '@aws-cdk-blocks/core';
 
 import { runtimeSsoProviders, ssoSettingIds } from './sso-config.js';
 import { DEPLOYED } from './deployed.js';
@@ -47,6 +47,7 @@ import { bumpEpoch } from './epoch.js';
 import {
   ALL_ROLE_GROUPS,
   ALL_USERS,
+  IDP_SYNC,
   PROFILE,
   type Item,
   idOf,
@@ -252,6 +253,15 @@ export const federationProviders: ReadonlyArray<{ name: string; label: string }>
   ISSUER_URL !== ''
     ? READY_PROVIDERS.map(({ name, label }) => ({ name, label }))
     : Object.keys(providers).map((name) => ({ name, label: name }));
+
+/**
+ * The configured provider name behind a Cognito IdP registration name, or
+ * `undefined` for a registration this deployment does not declare.
+ */
+export function providerForRegistration(registration: string): string | undefined {
+  return RUNTIME_PROVIDERS.find((provider) => (provider.registration ?? provider.name) === registration)
+    ?.name;
+}
 
 // ─── The block ───────────────────────────────────────────────────────────────
 
@@ -463,17 +473,321 @@ export function hasEffectivePermission(
 }
 
 /**
- * Make the user's direct role-group edges say exactly what the IdP just said.
+ * The refusal for a federated account that ends a synchronisation with no
+ * permission at all. One message for both doors, in English like every other
+ * refusal the backend writes.
+ */
+export class NoAccessError extends ApiError {
+  constructor() {
+    super(
+      'This account has no access to this wiki yet. Ask a wiki administrator to grant access, then sign in again.',
+      403,
+      { name: 'ForbiddenException' },
+    );
+  }
+}
+
+/**
+ * The refusal for a synchronisation that could not get its turn: another one
+ * for the same account holds the record and has not finished, or took it over
+ * while this one was running. Retrying shortly is the whole remedy.
+ */
+export class SyncBusyError extends ApiError {
+  constructor() {
+    super('Permissions for this account are being updated. Retry in a few seconds.', 503, {
+      name: 'ServiceUnavailableException',
+    });
+  }
+}
+
+// ─── Synchronisation ─────────────────────────────────────────────────────────
+//
+// Two doors bring news of a federated account's IdP groups. A browser sign-in
+// carries them in its ID token. A bearer request (MCP, the sync API) carries
+// none — an access token has no custom attributes — so `bearer-auth.ts` reads
+// them from the pool, which rewrites them on every federated sign-in through
+// any app client. Both go through `syncIdpGroups` below, so the mapping rule,
+// the removal-first order and the zero-permission refusal exist once.
+//
+// What makes two doors safe is the account's synchronisation record
+// (`USER#<sub>` / `IDP_SYNC`). It holds the newest authentication time whose
+// groups have been written, and a lease that lets one synchroniser at a time
+// touch the account's edges. A sign-in no newer than the recorded time is not
+// written at all: a browser sign-in processed late carries the groups of its
+// own moment, and must not put back an edge a newer synchronisation removed.
+
+/**
+ * How long a synchroniser may go on writing after it took the lease.
+ *
+ * A request is answered after 28 seconds whatever its handler is doing, and
+ * the handler is not stopped: its execution environment is frozen and may
+ * resume the same work much later. So a holder cannot be trusted to have
+ * stopped just because its lease ran out. Instead it checks its own clock
+ * against this budget before every write, and a holder thawed after the budget
+ * stops at the next check — `Date.now()` has moved on while it was frozen.
+ */
+const SYNC_BUDGET_MS = 20 * 1000;
+
+/**
+ * How long a lease is held before another synchroniser may take it over.
+ *
+ * Well past the budget, so a holder still inside its budget always still holds
+ * its lease. A synchroniser that fails with an error hands the lease back on
+ * its way out; one that is frozen or crashes leaves it to expire, which keeps
+ * that one account's sign-ins and bearer requests waiting for up to this long.
+ */
+const LEASE_MS = 60 * 1000;
+
+/** Attempts at taking the lease before giving up with `SyncBusyError`. */
+const LEASE_ATTEMPTS = 5;
+
+/** What a synchronisation reads and writes, so tests can stand in for the table. */
+export interface SyncStore {
+  /** The synchronisation record, read with strong consistency. */
+  readRecord(userId: string): Promise<Item | undefined>;
+  /**
+   * Write the record if its version is still `expected` (absent when there was
+   * no record). `false` when the condition failed.
+   */
+  writeRecord(record: Item, expected: number | undefined): Promise<boolean>;
+  readOwn(userId: string): Promise<Item[]>;
+  readRoleGroups(): Promise<Item[]>;
+  deleteEdge(userId: string, roleGroupId: string): Promise<void>;
+  putEdge(edge: Item): Promise<void>;
+  writeProfile(own: Item[], userId: string, email: string, provider: string): Promise<void>;
+  bumpEpoch(): Promise<void>;
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+const tableStore: SyncStore = {
+  readRecord: async (userId) => (await table.get({ pk: userPk(userId), sk: IDP_SYNC })) ?? undefined,
+  writeRecord: async (record, expected) => {
+    try {
+      await putItem(
+        record,
+        expected === undefined ? { ifNotExists: true } : { ifFieldEquals: { version: expected } },
+      );
+      return true;
+    } catch (error: unknown) {
+      if (isBlocksError(error, KVStoreErrors.ConditionalCheckFailed)) return false;
+      throw error;
+    }
+  },
+  readOwn: (userId) => valuesOf(table.query({ where: { pk: { equals: userPk(userId) } } })),
+  readRoleGroups: () =>
+    valuesOf(table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_ROLE_GROUPS } } })),
+  deleteEdge: (userId, roleGroupId) =>
+    table.delete({ pk: userPk(userId), sk: roleGroupPk(roleGroupId) }),
+  putEdge: (edge) => putItem(edge),
+  writeProfile,
+  bumpEpoch,
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** One synchronisation request. */
+export type SyncInput = {
+  userId: string;
+  /** The `auth_time` of the sign-in whose groups are being applied, in seconds. */
+  authTime: number;
+  /**
+   * Where the groups come from: the ID token's claims, or the pool. Called only
+   * once this synchroniser holds the lease, so what it reads is no older than
+   * the moment the account's edges are rewritten.
+   */
+  load: () => Promise<{ provider: string; groups: string[] }>;
+  /** The browser door's directory write. The bearer door never creates one. */
+  profileEmail?: string;
+};
+
+/**
+ * Where a synchronisation left the account.
+ *
+ * `own` is the user's partition as it now stands, so a caller can walk the
+ * permissions without reading it again. `changed` says whether any edge moved
+ * — and so whether the permission epoch did.
+ */
+export type SyncResult = { applied: boolean; changed: boolean; own: Item[] };
+
+/**
+ * Bring a federated account's direct role-group edges up to what its IdP says.
  *
  * Additive synchronisation was rejected: it cannot express a removal, so a user
  * taken out of a group at the IdP would keep the permission here forever, and
  * the whole point of delegating to the IdP is that the IdP is where the answer
- * lives. Edges the claims no longer name are therefore deleted.
+ * lives. Edges the groups no longer name are therefore deleted.
  *
  * Only `ROLE_MEMBERSHIP` is rewritten. User-group membership belongs to the
  * Wiki and is left alone — that is what lets `seed-admin` grant an
  * administrator who signs in through the IdP, and what keeps an IdP
  * misconfiguration from locking every administrator out at once.
+ *
+ * A sign-in no newer than the one already applied returns `applied: false`
+ * with the partition untouched; deciding whether that partition grants
+ * anything is the caller's.
+ *
+ * Throws `NoAccessError` when the account ends with no permission, and
+ * `SyncBusyError` when it cannot get the lease.
+ */
+export async function syncIdpGroups(
+  input: SyncInput,
+  store: SyncStore = tableStore,
+): Promise<SyncResult> {
+  for (let attempt = 0; attempt < LEASE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await store.sleep(150 * attempt);
+    const record = await store.readRecord(input.userId);
+    const syncedAuthTime = record?.syncedAuthTime ?? 0;
+    if (input.authTime <= syncedAuthTime) {
+      return { applied: false, changed: false, own: await store.readOwn(input.userId) };
+    }
+    // Someone else is mid-way. Their result may make this one unnecessary, so
+    // wait and start again from the read.
+    if (record?.leaseUntil !== undefined && record.leaseUntil > store.now()) continue;
+
+    const lease: Item = {
+      pk: userPk(input.userId),
+      sk: IDP_SYNC,
+      type: 'IDP_SYNC',
+      syncedAuthTime,
+      ...(record?.roleGroupIds !== undefined ? { roleGroupIds: record.roleGroupIds } : {}),
+      leaseUntil: store.now() + LEASE_MS,
+      version: record === undefined ? 0 : (record.version ?? 0) + 1,
+    };
+    if (!(await store.writeRecord(lease, record === undefined ? undefined : (record.version ?? 0)))) {
+      continue;
+    }
+    return await applyHeld(input, store, lease);
+  }
+  throw new SyncBusyError();
+}
+
+/** The synchronisation proper, run while holding `lease`. */
+async function applyHeld(input: SyncInput, store: SyncStore, lease: Item): Promise<SyncResult> {
+  const { userId } = input;
+  const version = lease.version ?? 0;
+  const deadline = store.now() + SYNC_BUDGET_MS;
+  const previous = lease.roleGroupIds ?? [];
+  let recorded = previous;
+  const release = async (syncedAuthTime: number, roleGroupIds: string[]): Promise<void> => {
+    const { leaseUntil: _held, ...rest } = lease;
+    // Losing this write means the lease expired and somebody else took the
+    // record over; their run supersedes this one, so there is nothing to undo.
+    await store.writeRecord(
+      { ...rest, syncedAuthTime, roleGroupIds, version: version + 1 },
+      version,
+    );
+  };
+  // Called before every write. Past the budget the lease may already be
+  // somebody else's (see `SYNC_BUDGET_MS`); a version that moved means it is.
+  const stillHeld = async (): Promise<void> => {
+    if (store.now() > deadline) throw new SyncBusyError();
+    const current = await store.readRecord(userId);
+    if (current?.version !== version) throw new SyncBusyError();
+  };
+
+  let edgesTouched = false;
+  try {
+    const { provider, groups } = await input.load();
+    const [own, roleGroups] = await Promise.all([store.readOwn(userId), store.readRoleGroups()]);
+
+    const wanted = new Set(roleGroupsForIdpGroups(roleGroups, provider, groups));
+    const held = new Set(
+      own.filter((item) => item.type === 'ROLE_MEMBERSHIP').map((item) => idOf(item.sk)),
+    );
+    const toAdd = [...wanted].filter((id) => !held.has(id));
+    // The partition read is eventually consistent, so an edge the previous
+    // synchronisation wrote a moment ago may be missing from it. The record is
+    // read strongly and lists what that synchronisation wrote, so those are
+    // removed as well when no longer wanted; deleting an edge that is already
+    // gone does nothing.
+    const toRemove = new Set(
+      [...held, ...previous].filter((id) => !wanted.has(id)),
+    );
+    // Whatever happens next, the record goes on naming every edge this run may
+    // leave behind, so a later run can find them without the partition read.
+    recorded = [...new Set([...previous, ...wanted])];
+
+    // Removals are completed and announced before anything else runs. The two
+    // directions fail differently: an addition that lands while a later step
+    // throws costs the user a permission they should have, until the backstop
+    // TTL expires. A removal in the same position is a permission this Wiki has
+    // revoked and every warm execution environment goes on handing out for the
+    // same five minutes. Only one of those is worth ordering around, so the
+    // revocation runs first and moves the generation immediately.
+    if (toRemove.size > 0) {
+      await stillHeld();
+      edgesTouched = true;
+      await Promise.all([...toRemove].map((roleGroupId) => store.deleteEdge(userId, roleGroupId)));
+      await store.bumpEpoch();
+    }
+
+    // A federated account that ends with no permissions at all is turned away
+    // at the door rather than let in to an empty screen. The check sits above
+    // the profile write so a rejected visitor never appears in the user
+    // directory, and below the removals so a revocation down to zero still
+    // lands before the refusal. The result is recorded like any other, so the
+    // same sign-in is not synchronised again on every request it makes.
+    if (!hasEffectivePermission(own, wanted)) {
+      await release(input.authTime, []);
+      throw new NoAccessError();
+    }
+
+    if (input.profileEmail !== undefined) {
+      if (store.now() > deadline) throw new SyncBusyError();
+      await store.writeProfile(own, userId, input.profileEmail, provider);
+    }
+
+    const added: Item[] = [];
+    if (toAdd.length > 0) {
+      // The last point before a grant is written. A holder that has lost its
+      // lease — it outlived it and somebody took over — must not write one.
+      await stillHeld();
+      edgesTouched = true;
+      const at = new Date(store.now()).toISOString();
+      for (const roleGroupId of toAdd) {
+        added.push({
+          pk: userPk(userId),
+          sk: roleGroupPk(roleGroupId),
+          type: 'ROLE_MEMBERSHIP',
+          gsi1pk: roleGroupPk(roleGroupId),
+          gsi1sk: userPk(userId),
+          addedAt: at,
+          addedBy: `idp:${provider}`,
+        });
+      }
+      await Promise.all(added.map((edge) => store.putEdge(edge)));
+      await store.bumpEpoch();
+    }
+
+    // Nothing moved, so nothing is announced. Bumping on every sign-in would
+    // throw away every execution environment's resolved answers for every user
+    // each time anybody signed in, which is the cost this counter exists to
+    // avoid.
+    await release(input.authTime, [...wanted]);
+    return {
+      applied: true,
+      changed: toRemove.size > 0 || added.length > 0,
+      own: [
+        ...own.filter(
+          (item) => !(item.type === 'ROLE_MEMBERSHIP' && toRemove.has(idOf(item.sk))),
+        ),
+        ...added,
+      ],
+    };
+  } catch (error: unknown) {
+    if (error instanceof NoAccessError) throw error;
+    // Hand the lease back without advancing the recorded time, so the next
+    // request starts over rather than waiting out the lease. Best effort: if it
+    // fails too, the lease expiring is the fallback.
+    await release(lease.syncedAuthTime ?? 0, recorded).catch(() => undefined);
+    if (edgesTouched) await store.bumpEpoch().catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * The browser door: synchronise from the sign-in's own ID token.
  *
  * Throwing here fails the sign-in and sets no cookie, which is deliberate: a
  * session whose permissions could not be established should not exist.
@@ -488,77 +802,41 @@ async function syncRoleGroups(user: AuthenticatedUser): Promise<void> {
   const email = user.attributes.email ?? user.username;
   // The provider key in this block's `providers`: the configured name.
   const provider = user.signInProvider;
+  const claims = user.claims ?? {};
 
-  const [own, roleGroups] = await Promise.all([
-    valuesOf(table.query({ where: { pk: { equals: userPk(userId) } } })),
-    valuesOf(table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_ROLE_GROUPS } } })),
-  ]);
+  const result = await syncIdpGroups({
+    userId,
+    authTime: authTimeOf(claims, Date.now()),
+    load: async () => ({ provider, groups: groupsFromClaims(claims, GROUPS_CLAIM) }),
+    profileEmail: email,
+  });
+  if (result.applied) return;
 
-  const wanted = new Set(
-    roleGroupsForIdpGroups(roleGroups, provider, groupsFromClaims(user.claims ?? {}, GROUPS_CLAIM)),
-  );
-  const held = new Set(
-    own.filter((item) => item.type === 'ROLE_MEMBERSHIP').map((item) => idOf(item.sk)),
-  );
+  // A newer sign-in has already been applied, so this one's claims are stale
+  // and the edges stay as they are. The sign-in itself still stands, under the
+  // same rule as every other: it is refused when the edges grant nothing.
+  if (!hasEffectivePermission(result.own, directRoleGroups(result.own))) throw new NoAccessError();
+  await writeProfile(result.own, userId, email, provider);
+}
 
-  const toAdd = [...wanted].filter((id) => !held.has(id));
-  const toRemove = [...held].filter((id) => !wanted.has(id));
+/** The role groups a user's partition names directly. */
+export function directRoleGroups(own: readonly Item[]): Set<string> {
+  return new Set(own.filter((item) => item.type === 'ROLE_MEMBERSHIP').map((item) => idOf(item.sk)));
+}
 
-  // Removals are completed and announced before anything else runs. The two
-  // directions fail differently: an addition that lands while a later step
-  // throws costs the user a permission they should have, until the backstop TTL
-  // expires. A removal in the same position is a permission this Wiki has
-  // revoked and every warm execution environment goes on handing out for the
-  // same five minutes. Only one of those is worth ordering around, so the
-  // revocation runs first and moves the generation immediately.
-  if (toRemove.length > 0) {
-    await Promise.all(
-      toRemove.map((roleGroupId) =>
-        table.delete({ pk: userPk(userId), sk: roleGroupPk(roleGroupId) }),
-      ),
-    );
-    await bumpEpoch();
-  }
-
-  // A federated sign-in that ends with no permissions at all does not happen:
-  // an account with nothing to see is turned away at the door rather than let
-  // in to an empty screen. The check sits above the profile write so a rejected
-  // visitor never appears in the user directory, and below the removals so a
-  // revocation down to zero still lands before the refusal. The password door
-  // has no such gate — its accounts are created by an operator on purpose, and
-  // it is the way back in when the IdP configuration locks everyone out.
-  if (!hasEffectivePermission(own, wanted)) {
-    throw new ApiError(
-      'This account has no access to this wiki yet. Ask a wiki administrator to grant access, then sign in again.',
-      403,
-      { name: 'ForbiddenException' },
-    );
-  }
-
-  await writeProfile(own, userId, email, provider);
-
-  if (toAdd.length > 0) {
-    const at = new Date().toISOString();
-    await Promise.all(
-      toAdd.map((roleGroupId) =>
-        putItem({
-          pk: userPk(userId),
-          sk: roleGroupPk(roleGroupId),
-          type: 'ROLE_MEMBERSHIP',
-          gsi1pk: roleGroupPk(roleGroupId),
-          gsi1sk: userPk(userId),
-          addedAt: at,
-          addedBy: `idp:${provider}`,
-        }),
-      ),
-    );
-    await bumpEpoch();
-  }
-
-  // Nothing moved, so nothing is announced. Bumping on every sign-in would
-  // throw away every execution environment's resolved answers for every user
-  // each time anybody signed in, which is the cost this counter exists to
-  // avoid.
+/**
+ * The sign-in time a token's claims state, in seconds.
+ *
+ * Cognito puts `auth_time` in both its ID and access tokens, and so does the
+ * local stub IdP. This is the fallback for a token without one: the sign-in is
+ * taken to have happened now, which is the same reading the `Auth` block gives
+ * such a token — the hook runs a moment after the sign-in it reports. The
+ * fallback keeps the milliseconds, so two such sign-ins a moment apart are
+ * still told apart.
+ */
+export function authTimeOf(claims: Readonly<Record<string, unknown>>, nowMs: number): number {
+  const value = claims.auth_time;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : nowMs / 1000;
 }
 
 /**

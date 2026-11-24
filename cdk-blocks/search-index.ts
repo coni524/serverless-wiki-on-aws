@@ -70,7 +70,7 @@ const MAX_CHUNKS = 600;
 const BATCH = 500;
 
 /** `QueryVectors` accepts at most 1,024 characters of query text. */
-const MAX_QUERY_CHARS = 1024;
+export const MAX_QUERY_CHARS = 1024;
 
 /** A metadata filter may hold at most 100 constraints; `$in` counts each value. */
 const MAX_FILTER_VALUES = 100;
