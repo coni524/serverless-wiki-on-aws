@@ -62,7 +62,7 @@ export type AttachmentContext = {
 /**
  * How many distinct attachments one body's links are resolved for.
  *
- * Matches `MAX_SIGNED_ATTACHMENTS` in `aws-blocks/attachments.ts`, which refuses
+ * Matches `MAX_SIGNED_ATTACHMENTS` in `cdk-blocks/attachments.ts`, which refuses
  * a longer signing request outright. Stopping at the cap here leaves the images
  * past it as plain links instead of costing the page every image it has.
  */

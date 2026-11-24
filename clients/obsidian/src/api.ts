@@ -4,7 +4,7 @@
  * Plain JSON in, plain JSON out, one HTTP request per call. `requestUrl` rather
  * than `fetch`: it goes through Obsidian's own network layer, which sends no
  * `Origin` header, and the sync surface refuses a request whose `Origin` is not
- * the deployment's own (`guardOrigin` in `aws-blocks/bearer-auth.ts`).
+ * the deployment's own (`guardOrigin` in `cdk-blocks/bearer-auth.ts`).
  *
  * ─── The two refusals worth telling apart ───────────────────────────────────
  * A 401 is about the token and this module handles it: refresh once, retry once.
@@ -18,7 +18,7 @@ import { t } from './i18n';
 import type { RemoteNode } from './paths';
 import { type SettingsHost, normalizeUrl } from './settings';
 
-/** The fourteen methods of `aws-blocks/ext-methods.ts`. */
+/** The fourteen methods of `cdk-blocks/ext-methods.ts`. */
 export type ExtMethod =
   | 'listSpaces'
   | 'listPages'

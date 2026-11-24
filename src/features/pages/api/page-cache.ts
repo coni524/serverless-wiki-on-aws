@@ -20,7 +20,7 @@
  * it. Everything else waits for the server.
  */
 import { useQuery, type QueryKey } from '@tanstack/react-query';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import { PERSIST_MAX_AGE_MS, clearPersistedCache, queryClient } from '@/lib/react-query';
 import { attachmentsKey } from '@/features/pages/api/attachment-list';
 import type { FolderDetail, Page, PageDetail } from '@/types/api';

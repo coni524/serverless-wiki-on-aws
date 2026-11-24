@@ -11,7 +11,7 @@
  * holds — so neither is persisted to disk; `app/provider.tsx` dehydrates page
  * bodies and nothing else.
  */
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import { type QueryKey } from '@tanstack/react-query';
 import { queryClient } from '@/lib/react-query';
 

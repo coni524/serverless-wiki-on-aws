@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { api, authApi } from 'aws-blocks';
-import { Authenticator, broadcastAuthChange, onAuthChange } from '@aws-blocks/blocks/ui';
+import { api, authApi } from 'cdk-blocks';
+import { Authenticator, broadcastAuthChange, onAuthChange } from 'aws-cdk-blocks/ui';
 import AppLayout from '@cloudscape-design/components/app-layout';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';

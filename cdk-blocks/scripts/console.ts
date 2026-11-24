@@ -1,9 +1,9 @@
-import { openConsole } from '@aws-blocks/blocks/scripts';
+import { openConsole } from 'aws-cdk-blocks/scripts';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 openConsole({ 
-  outputsFile: join(__dirname, '..', '..', '.blocks-sandbox', 'outputs.json')
+  outputsFile: join(__dirname, '..', '..', '.cdk-blocks-sandbox', 'outputs.json')
 });

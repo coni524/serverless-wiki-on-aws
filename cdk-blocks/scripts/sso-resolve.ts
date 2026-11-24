@@ -6,9 +6,11 @@
  * the pool's issuer URL, and each federation app client's id and secret.
  * Leaving them to whoever types the deploy command would be a step that is
  * remembered until it isn't, so both deploy scripts resolve them from the
- * stack and store the credentials where the runtime reads them (the
- * `sso-client-id*` / `sso-client-secret*` AppSettings in SSM). Shared between
- * `deploy.ts` and `sandbox.ts` because the two stacks differ only in name.
+ * stack. The client ids go to the backend as a deploy-time value
+ * (`SSO_CLIENT_IDS`), the way the issuer URL does; the secrets are stored where
+ * the runtime reads them (the `sso-client-secret*` AppSettings in SSM). Shared
+ * between `deploy.ts` and `sandbox.ts` because the two stacks differ only in
+ * name.
  */
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import {
@@ -62,15 +64,15 @@ function isStackNotFound(error: unknown): boolean {
 }
 
 /**
- * Resolves `SSO_ISSUER_URL` and stores the federation-client credentials of
- * every entry the stack already carries. Returns whether *all* entries were
+ * Resolves `SSO_ISSUER_URL` and `SSO_CLIENT_IDS`, and stores the
+ * federation-client secret of every entry the stack already carries. Returns whether *all* entries were
  * served — `false` asks the caller for a second pass, which is how the deploy
  * that enables SSO, or adds an entry, gets its new client created and then
  * resolved.
  *
  * The entries that already exist are resolved even when others are missing.
  * This is not an optimisation but a safety rule: `SSO_ISSUER_URL` is what
- * makes the synth declare the AuthOIDC surface at all, so a deploy that adds
+ * makes the synth declare the `sso` block at all, so a deploy that adds
  * a second IdP to a stack whose first one is live must keep the issuer set on
  * its first pass — an all-or-nothing answer would synth that pass with no
  * providers, tear the running SSO surface out of the stack, and strand its
@@ -106,62 +108,61 @@ export async function resolveSso(
     if (secret === undefined || secret === '') {
       throw new Error(
         `The federation app client ${clientId} (${entry.providerName}) has no secret. It is ` +
-          'created with `generateSecret: true` (aws-blocks/index.cdk.ts), so this means the ' +
+          'created with `generateSecret: true` (cdk-blocks/index.cdk.ts), so this means the ' +
           'client was replaced by something that does not match — fix the stack before ' +
           'deploying SSO.',
       );
     }
 
-    // The AppSetting parameter names, as `@aws-blocks/bb-app-setting` derives
-    // them: `/<stack>-<scope path>`. Hardcoding the `sl-wiki` scope segment is
-    // accepted — it is as fixed as the AppSetting ids themselves, and a rename
-    // would already be a new parameter. The derivation rule itself is the
-    // shakier dependency: the block's README does not document it, so this
-    // spelling is mimicry of observed behaviour, and a block update that
-    // changes it would break nothing visibly here — the deploy would succeed
-    // and write parameters the runtime never reads, and the symptom would be
-    // federated sign-in failing for no stated reason. If SSO breaks right
-    // after a `@aws-blocks/*` update, check these names against what the
-    // runtime resolves first.
+    // The AppSetting parameter name: the block documents it as `/<fullId>`,
+    // which on a deployed stack is `/<stack>-<scope>-<id>`. Hardcoding the
+    // `sl-wiki` scope segment is accepted — it is as fixed as the AppSetting
+    // ids themselves, and a rename would already be a new parameter. A block
+    // update that changed the rule would break nothing visibly here — the
+    // deploy would succeed and write a parameter the runtime never reads, and
+    // the symptom would be federated sign-in failing for no stated reason. If
+    // SSO breaks right after an `@aws-cdk-blocks/*` update, check this name
+    // against the setting's `parameterName` first.
     //
-    // Written on every SSO deploy, not only the first: the values are wholly
-    // owned by the stack (nobody rotates them by hand), so rewriting keeps
-    // them correct across a client replacement. JSON-encoded because that is
-    // the format `AppSetting.get()` parses.
+    // Written on every SSO deploy, not only the first: the value is wholly
+    // owned by the stack (nobody rotates it by hand), so rewriting keeps it
+    // correct across a client replacement. JSON-encoded because that is the
+    // format `AppSetting.get()` parses.
     const ids = ssoSettingIds({ name: entry.providerName, primary: entry.primary });
-    for (const [name, value] of [
-      [`/${stackName}-sl-wiki-${ids.clientId}`, clientId!],
-      [`/${stackName}-sl-wiki-${ids.clientSecret}`, secret],
-    ] as const) {
-      try {
-        await ssm.send(
-          new PutParameterCommand({
-            Name: name,
-            Value: JSON.stringify(value),
-            Type: 'SecureString',
-            Overwrite: true,
-          }),
-        );
-      } catch (error) {
-        // The writes are not atomic, so failing between them can leave a
-        // stored id and secret disagreeing — federated sign-in fails until
-        // both are rewritten. Every SSO deploy rewrites all of them, so the
-        // recovery is simply running the deploy again, and the error has to
-        // say so: the operator reading it has no other way to know the fix is
-        // that cheap.
-        throw new Error(
-          `Storing the federation client credentials failed at ${name}. The ids and secrets ` +
-            'are written one after the other, so a stored pair may now disagree and federated ' +
-            'sign-in may fail. Re-run the deploy — every SSO deploy rewrites all of them.',
-          { cause: error },
-        );
-      }
+    const name = `/${stackName}-sl-wiki-${ids.clientSecret}`;
+    try {
+      await ssm.send(
+        new PutParameterCommand({
+          Name: name,
+          Value: JSON.stringify(secret),
+          Type: 'SecureString',
+          Overwrite: true,
+        }),
+      );
+    } catch (error) {
+      // The id reaches the backend with the deploy and the secret through
+      // this write, so a failure here leaves the backend holding a client id
+      // whose stored secret is stale or missing. Every SSO deploy rewrites
+      // the secret, so the recovery is simply running the deploy again, and
+      // the error has to say so: the operator reading it has no other way to
+      // know the fix is that cheap.
+      throw new Error(
+        `Storing the federation client secret failed at ${name}, so federated sign-in ` +
+          `through ${entry.providerName} may fail. Re-run the deploy — every SSO deploy ` +
+          'rewrites the secrets.',
+        { cause: error },
+      );
     }
-    console.log(
-      `🔗 SSO client credentials stored (/${stackName}-sl-wiki-${ids.clientId}, …-secret)`,
-    );
+    console.log(`🔗 SSO client secret stored (${name})`);
   }
 
+  // The block takes each client id as a plain string when the provider is
+  // declared, at synth and again in the backend, so the ids travel the same way
+  // as the issuer URL (`index.cdk.ts` forwards both). Only the entries whose
+  // client already exists are named; the rest are declared on the second pass.
+  process.env.SSO_CLIENT_IDS = JSON.stringify(
+    Object.fromEntries(present.map(({ entry, clientId }) => [entry.providerName, clientId])),
+  );
   process.env.SSO_ISSUER_URL = issuerUrl;
   console.log(`🔗 SSO_ISSUER_URL resolved from the running stack: ${issuerUrl}`);
   // The group claim arrives inside a Cognito ID token, where each identity

@@ -9,7 +9,7 @@
  * `read` is re-evaluated, and a signature held in a cache would outlive the
  * permission that produced it.
  */
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import { type QueryKey } from '@tanstack/react-query';
 import { queryClient } from '@/lib/react-query';
 

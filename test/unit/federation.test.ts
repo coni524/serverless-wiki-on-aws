@@ -14,9 +14,10 @@ import {
   canonicalUserIdFor,
   groupsFromClaims,
   hasEffectivePermission,
+  parseClientIds,
   roleGroupsForIdpGroups,
-} from '../../aws-blocks/federation.js';
-import type { Item } from '../../aws-blocks/model.js';
+} from '../../cdk-blocks/federation.js';
+import type { Item } from '../../cdk-blocks/model.js';
 
 const roleGroup = (id: string, idpGroup?: string, global?: boolean): Item => ({
   pk: `RG#${id}`,
@@ -267,4 +268,22 @@ test('items that are not role groups are ignored', () => {
     idpGroups: [{ provider: 'sso', group: 'editors' }],
   };
   assert.deepStrictEqual(roleGroupsForIdpGroups([notARoleGroup], 'sso', ['editors']), []);
+});
+
+test('the federation client ids round-trip through SSO_CLIENT_IDS', () => {
+  const ids = parseClientIds(JSON.stringify({ sso: 'client-a', okta: 'client-b' }));
+  assert.deepStrictEqual([...ids], [
+    ['sso', 'client-a'],
+    ['okta', 'client-b'],
+  ]);
+  assert.strictEqual(parseClientIds(undefined).size, 0);
+  assert.strictEqual(parseClientIds('  ').size, 0);
+});
+
+test('a hand-mangled SSO_CLIENT_IDS is refused rather than part-read', () => {
+  // The value is written by the deploy script; anything else is corruption,
+  // and a provider declared with a wrong client id fails only at sign-in.
+  for (const raw of ['["client-a"]', '{"sso": 1}', '{"sso": ""}', 'null']) {
+    assert.throws(() => parseClientIds(raw), /SSO_CLIENT_IDS/);
+  }
 });

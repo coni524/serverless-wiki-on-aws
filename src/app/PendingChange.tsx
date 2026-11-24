@@ -21,8 +21,8 @@ import { pageQuery } from '@/features/pages/api/page-cache';
 import { spaceQuery } from '@/features/spaces/api/space-cache';
 // The one repair the write path applies to a model-composed body, reached from
 // the browser so this card shows the text that would actually be stored. See
-// `aws-blocks/model-text.ts` for why the rule lives in one place.
-import { unescapeModelNewlines } from '../../aws-blocks/model-text';
+// `cdk-blocks/model-text.ts` for why the rule lives in one place.
+import { unescapeModelNewlines } from '../../cdk-blocks/model-text';
 import {
   countChanges,
   diffLines,

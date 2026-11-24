@@ -10,7 +10,7 @@
  * screen is what asks it.
  */
 import { useQuery, type QueryKey } from '@tanstack/react-query';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 
 export const authProvidersKey: QueryKey = ['authProviders'];
 
@@ -35,8 +35,8 @@ export function useAuthProviders() {
  * from — the dev server proxies it, and CloudFront forwards it.
  */
 export function signInUrl(provider: string): string {
-  return `/aws-blocks/auth/signin/${encodeURIComponent(provider)}`;
+  return `/cdk-blocks/auth/signin/${encodeURIComponent(provider)}`;
 }
 
 /** Where the browser goes to end a federated session. */
-export const FEDERATED_SIGN_OUT_URL = '/aws-blocks/auth/signout';
+export const FEDERATED_SIGN_OUT_URL = '/cdk-blocks/auth/signout';

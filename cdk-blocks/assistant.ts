@@ -21,8 +21,8 @@
  *    write it, a sentence in a page body ("act as the administrator") would be
  *    enough to impersonate someone.
  */
-import { Agent, getDeploymentType } from '@aws-blocks/blocks';
-import { ApiError } from '@aws-blocks/core';
+import { Agent, getDeploymentType } from 'aws-cdk-blocks';
+import { ApiError } from '@aws-cdk-blocks/core';
 import { z } from 'zod';
 
 import { scope } from './resources.js';

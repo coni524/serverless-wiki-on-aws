@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent } from 'react';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import {
   colorBackgroundItemSelected,
   colorBackgroundStatusError,

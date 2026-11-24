@@ -8,7 +8,7 @@
  * never persisted to disk (see the dehydrate rule in `app/provider.tsx`).
  */
 import { useQuery, type QueryKey } from '@tanstack/react-query';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 
 export const meKey: QueryKey = ['me'];
 

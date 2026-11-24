@@ -12,7 +12,7 @@
  * user's role groups. A second copy of either function would be an
  * authorization mechanism maintained in two places.
  */
-import { table } from './resources.js';
+import { putItem, table } from './resources.js';
 import { CONFIG_EPOCH, CONFIG_PK } from './model.js';
 
 /**
@@ -27,6 +27,11 @@ import { CONFIG_EPOCH, CONFIG_PK } from './model.js';
  *
  * If the table is unreachable rather than this key, the hops fail on their own
  * and the request fails there, which is the fail-closed outcome.
+ *
+ * A strongly consistent read — the store's default for `get`, kept on purpose:
+ * a generation moved a moment ago is seen by the very next request, so a
+ * stored answer from before the change is never matched against a stale copy
+ * of the record that was supposed to retire it.
  */
 export async function readEpoch(): Promise<string | null> {
   try {
@@ -49,7 +54,7 @@ export async function readEpoch(): Promise<string | null> {
  * incremented, and written back under an optimistic lock.
  */
 export async function bumpEpoch(): Promise<void> {
-  await table.put({
+  await putItem({
     pk: CONFIG_PK,
     sk: CONFIG_EPOCH,
     type: 'EPOCH',

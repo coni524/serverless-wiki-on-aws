@@ -1,4 +1,4 @@
-import { destroy } from '@aws-blocks/blocks/scripts';
+import { destroy } from 'aws-cdk-blocks/scripts';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 

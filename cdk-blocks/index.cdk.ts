@@ -8,11 +8,11 @@ import {
   SandboxDisableDeletionProtection,
   isSandboxContext,
   registerConfig,
-} from '@aws-blocks/blocks/cdk';
+} from 'aws-cdk-blocks/cdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { getStackName } from '@aws-blocks/blocks/scripts';
+import { getStackName } from 'aws-cdk-blocks/scripts';
 
 import {
   ssoCallbackOriginsFromConfig,
@@ -72,10 +72,12 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
 // Both load the stack's config into `process.env` before importing it, but the
 // runtime loads it once, when it starts, and keeps that state for every later
 // session. The runtime is created or updated before the config file is
-// written (the file carries the runtime's ARN), so a runtime can start on a
-// missing or previous config and never see the current one. A value the
-// backend reads is therefore registered as config for the Lambda and also
-// written straight into the runtime's environment.
+// written (the file carries the runtime's ARN). The framework now copes with a
+// runtime that starts before any config file exists, but not with one that
+// starts during an update and reads the previous file: that runtime keeps the
+// previous values for as long as it lives. A value the backend reads is
+// therefore registered as config for the Lambda and also written straight into
+// the runtime's environment, which an update does replace.
 //
 // The block exposes no handle to the runtime and no way to add to its
 // environment, so the resource is found by walking the tree and the variables
@@ -193,9 +195,18 @@ if (modelId !== undefined && modelId !== '') {
 // the registration that puts the external IdP behind that pool sits further
 // down, beside the pool it registers on.
 //
-// The credentials are not here. They live in SSM as `AppSetting`s the runtime
-// resolves, so rotating them is a parameter write rather than a deploy.
-for (const name of ['SSO_ISSUER_URL', 'SSO_PROVIDERS', 'SSO_GROUPS_CLAIM', 'SSO_SCOPES']) {
+// The federation clients' ids are here too (`SSO_CLIENT_IDS`): the block takes
+// a client id as a plain string when the provider is declared, and an id is not
+// a secret. The clients' secrets are not here. They live in SSM as
+// `AppSetting`s the runtime resolves, so rotating one is a parameter write
+// rather than a deploy.
+for (const name of [
+  'SSO_ISSUER_URL',
+  'SSO_PROVIDERS',
+  'SSO_CLIENT_IDS',
+  'SSO_GROUPS_CLAIM',
+  'SSO_SCOPES',
+]) {
   const value = process.env[name];
   if (value !== undefined && value.trim() !== '') {
     setBackendEnv(name, value.trim());
@@ -211,17 +222,19 @@ for (const name of ['SSO_ISSUER_URL', 'SSO_PROVIDERS', 'SSO_GROUPS_CLAIM', 'SSO_
 // ─── MCP server: the Cognito OAuth surface ───────────────────────────────────
 // The MCP server itself is a `RawRoute` on this same Lambda and needs nothing
 // here. What it does need is a user pool that can act as an OAuth authorization
-// server, and AuthCognito deliberately builds one that cannot: its app client
-// is `disableOAuth`, and it creates no sign-in domain, because the block hands
-// the browser an opaque session cookie rather than Cognito's tokens.
+// server, and the `Auth` block deliberately builds one that cannot: with no
+// provider federating through the pool, its app client has OAuth turned off
+// and it creates no sign-in domain, because the block hands the browser an
+// opaque session cookie rather than Cognito's tokens.
 // None of that is undone below — a second app client is added alongside, for
 // external AI clients only.
 //
-// The pool is found by walking the tree, as the runtime above is. The
-// block does expose `userPool` on its CDK class, but reaching it would mean
-// importing `resources.ts` here, and that import resolves to the block's
-// *runtime* class under `tsc --noEmit` (the CDK class is behind an export
-// condition the type check does not apply), so the handle would not type.
+// The pool is found by walking the tree, as the runtime above is. Reaching it
+// through the block would mean importing `resources.ts` here, and that import
+// resolves to the block's *runtime* class under `tsc --noEmit` (the CDK class
+// is behind an export condition the type check does not apply), so the handle
+// would not type. The `sso` block in `federation.ts` has no pool of its own
+// (`store: 'builtin'`), so the password block's pool is the only one.
 // Matched exhaustively rather than by first hit: a second pool appearing in the
 // tree later would otherwise get the OAuth surface silently, and which one it
 // landed on would be an accident of construction order.
@@ -282,7 +295,7 @@ for (const reserved of ['aws', 'amazon', 'cognito']) {
   if (mcpDomainPrefix.includes(reserved)) {
     throw new Error(
       `The Cognito sign-in domain prefix "${mcpDomainPrefix}" contains the reserved word ` +
-        `"${reserved}". Rename the stack (\`.blocks/config.json\`) or the sandbox id.`,
+        `"${reserved}". Rename the stack (\`.cdk-blocks/config.json\`) or the sandbox id.`,
     );
   }
 }
@@ -295,7 +308,7 @@ const mcpDomain = userPool.addDomain('McpSignInDomain', {
 });
 // One domain, two doors. Besides the MCP OAuth flow it is named for, this
 // domain is what the pool's OIDC discovery document publishes as its
-// authorization and token endpoints — which is what lets the AuthOIDC block in
+// authorization and token endpoints — which is what lets the `sso` block in
 // `federation.ts` point at the pool as an ordinary OIDC issuer. The external
 // IdP registration below rides on it too: the IdP redirects back to
 // `<domain>/oauth2/idpresponse`.
@@ -304,7 +317,7 @@ const mcpDomain = userPool.addDomain('McpSignInDomain', {
 // The company IdP — Entra, Okta, OneLogin — is registered *on the pool*, not
 // talked to by the application. Sign-in flows browser → pool hosted UI → IdP →
 // back to the pool (which creates the federated account as a pool user) → the
-// AuthOIDC callback. That is what makes a federated user a Cognito user: MCP
+// `sso` block's callback. That is what makes a federated user a Cognito user: MCP
 // and `/ext/*` Bearer auth work for them unchanged, and every identifier is
 // the pool's `sub`.
 //
@@ -353,22 +366,28 @@ const ssoRegistrations = ssoEntries.map((entry) => {
     },
   });
 
-  // The app client the AuthOIDC block signs this entry's users in through.
+  // The app client the `sso` block signs this entry's users in through.
   // Confidential (`generateSecret`) because the pool's token endpoint refuses
   // public clients with no PKCE, and the block is a server-side caller that
-  // can hold a secret — the deploy script reads the generated value back and
-  // stores it as the entry's `sso-client-id*` / `sso-client-secret*`
-  // AppSettings the runtime resolves.
+  // can hold a secret — the deploy script reads the client's id back from the
+  // stack outputs (`SSO_CLIENT_IDS`) and its generated secret from Cognito,
+  // which it stores as the entry's `sso-client-secret*` AppSetting the runtime
+  // resolves.
   //
   // `supportedIdentityProviders` names only this entry's IdP, deliberately
   // omitting `COGNITO`: password accounts keep signing in through the app's
-  // own form (`AuthCognito`), never this client.
+  // own form (the `auth` block), never this client.
+  //
+  // The callback is the block's default `redirects.callbackPath`. The
+  // framework also still answers the previous `/aws-blocks/` prefix, but the
+  // block sends the new path as its `redirect_uri`, and Cognito matches
+  // redirect URIs exactly, so the new path is the one registered.
   const callbackUrls = sandboxMode
     ? // The sandbox front door: the frontend runs on localhost and proxies
-      // `/aws-blocks/*` to the deployed API, so this is the origin the
+      // `/cdk-blocks/*` to the deployed API, so this is the origin the
       // callback comes back to.
-      ['http://localhost:3000/aws-blocks/auth/callback']
-    : ssoCallbackOrigins().map((origin) => `${origin}/aws-blocks/auth/callback`);
+      ['http://localhost:3000/cdk-blocks/auth/callback']
+    : ssoCallbackOrigins().map((origin) => `${origin}/cdk-blocks/auth/callback`);
   const client = userPool.addClient(`SsoAuthClient${suffix}`, {
     userPoolClientName: entry.primary ? 'sl-wiki-sso' : `sl-wiki-sso-${entry.providerName}`,
     generateSecret: true,
@@ -394,7 +413,7 @@ const ssoRegistrations = ssoEntries.map((entry) => {
     preventUserExistenceErrors: true,
     enableTokenRevocation: true,
     accessTokenValidity: cdk.Duration.hours(1),
-    // Matches the AuthOIDC session's own 30-day horizon — a refresh token that
+    // Matches the `sso` block's 30-day session horizon — a refresh token that
     // outlives the session it serves would just be an unusable credential.
     refreshTokenValidity: cdk.Duration.days(30),
   });
@@ -406,7 +425,7 @@ const ssoRegistrations = ssoEntries.map((entry) => {
 });
 
 /**
- * The origins whose `/aws-blocks/auth/callback` the pool may redirect back to.
+ * The origins whose `/cdk-blocks/auth/callback` the pool may redirect back to.
  *
  * Cognito matches redirect URIs exactly, so the deployed origin must be known
  * at synth. The deploy script resolves it from the running stack (the same
@@ -501,12 +520,14 @@ setBackendEnv('MCP_USER_POOL_ID', userPool.userPoolId);
 setBackendEnv('MCP_CLIENT_ID', mcpClient.userPoolClientId);
 setBackendEnv('MCP_AUTH_DOMAIN', mcpDomain.baseUrl());
 
-// The address clients actually reach, when the request cannot say what it is.
-// Required whenever anything fronts the API — CloudFront does, and it replaces
-// the `Host` header with the API Gateway's own domain, so the OAuth metadata
-// would otherwise name an endpoint nobody connected to (see `mcp.ts`). It
-// cannot be read off the distribution here: that would make the Lambda depend
-// on the distribution which depends on the API which depends on the Lambda.
+// The address clients actually reach, stated rather than inferred (see
+// `PUBLIC_ORIGIN` in `bearer-auth.ts`). Behind the CloudFront door `Hosting`
+// creates, the request already carries the address the client called; what it
+// cannot carry is a domain put in front of the distribution by anything else,
+// and without the right address the OAuth metadata names an endpoint nobody
+// connected to. It cannot be read off the distribution here: that would make
+// the Lambda depend on the distribution which depends on the API which depends
+// on the Lambda.
 const publicOrigin = process.env.MCP_PUBLIC_ORIGIN;
 if (publicOrigin !== undefined && publicOrigin !== '') {
   setBackendEnv('MCP_PUBLIC_ORIGIN', publicOrigin);

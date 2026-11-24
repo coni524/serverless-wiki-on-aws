@@ -5,15 +5,16 @@
  *
  * Structure:
  *   - Setup (starts dev server, imports client) — don't touch
- *   - Auth tests (Cognito sign-up → confirm → sign-in → sign-out)
+ *   - Auth tests (sign-up refused → sign-in with MFA → sign-out)
  *
- * Each run signs up a fresh user, so the suite can be re-run without clearing
- * `.bb-data`.
+ * Sign-up is closed on every pool, the local one included, so the suite writes
+ * its accounts into the local pool (`cdk-blocks/scripts/local-users.ts`) before
+ * it starts the dev server. That needs the server down: a dev server that is
+ * already running would overwrite them, so the suite refuses to reuse one.
+ * Each run adds a fresh user, so the suite can be re-run without clearing
+ * `.cdk-blocks/local/data`.
  *
- * This suite only runs against the local mock. It provisions its user through
- * `signUp`, which the mock allows but a deployed pool refuses — the pool is
- * created with `selfSignUp: false`. Running it against a sandbox fails at the
- * sign-up step, not at the code lookup.
+ * This suite only runs against the local mock.
  *
  * To add tests: copy any test block, rename, change the assertion. The setup
  * boilerplate handles server lifecycle — you just call api.* methods.
@@ -22,17 +23,18 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { setTimeout } from 'node:timers/promises';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
-import { leafOnlyDeleteRefusal } from '../aws-blocks/refusals.js';
-import { isViewingLocale, withViewing, withoutViewing } from '../aws-blocks/viewing.js';
-import { unescapeModelNewlines } from '../aws-blocks/model-text.js';
-import { withoutDiscardedReplies } from '../aws-blocks/transcript.js';
-import { devServerIsUp, seed, seedLocal } from '../aws-blocks/scripts/seed-admin.js';
+import { leafOnlyDeleteRefusal } from '../cdk-blocks/refusals.js';
+import { addLocalUser } from '../cdk-blocks/scripts/local-users.js';
+import { isViewingLocale, withViewing, withoutViewing } from '../cdk-blocks/viewing.js';
+import { unescapeModelNewlines } from '../cdk-blocks/model-text.js';
+import { withoutDiscardedReplies } from '../cdk-blocks/transcript.js';
+import { devServerIsUp, seed, seedLocal } from '../cdk-blocks/scripts/seed-admin.js';
 import { countChanges, diffLines, tooLargeToDiff } from '../src/lib/diff.js';
 import { join } from 'node:path';
-import { installCookieJar } from '@aws-blocks/blocks/utils';
-import type { api as ApiType, authApi as AuthApiType } from 'aws-blocks';
+import { installCookieJar } from 'aws-cdk-blocks/utils';
+import type { api as ApiType, authApi as AuthApiType } from 'cdk-blocks';
 
 // Install cookie jar before importing the API client — Node's fetch doesn't
 // persist cookies between requests, which breaks authenticated API calls.
@@ -47,9 +49,10 @@ installCookieJar();
  * the ID token, so `groups` arrives as a real verified claim rather than
  * something the test reached past the IdP to insert.
  */
-mkdirSync(join(process.cwd(), '.bb-data', 'sl-wiki-sso'), { recursive: true });
+const STUB_USERS_DIR = join(process.cwd(), '.cdk-blocks', 'local', 'data', 'sl-wiki-sso');
+mkdirSync(STUB_USERS_DIR, { recursive: true });
 writeFileSync(
-  join(process.cwd(), '.bb-data', 'sl-wiki-sso', 'users.json'),
+  join(STUB_USERS_DIR, 'users.json'),
   JSON.stringify([
     {
       sub: 'stub-federated-user',
@@ -64,17 +67,17 @@ let server: ChildProcess | null = null;
 let api: typeof ApiType;
 let authApi: typeof AuthApiType;
 
-// Unique per run — Cognito rejects a second sign-up for the same address.
+// Unique per run, so each run exercises a first-time sign-in.
 const USERNAME = `e2e-${Date.now().toString(36)}@example.com`;
 const PASSWORD = 'E2eTestPass123!';
 
 /**
  * The answer to every TOTP challenge in this suite.
  *
- * Any six digits pass: the mock's `CONTINUE_SIGN_IN_WITH_TOTP_SETUP` and
- * `CONFIRM_SIGN_IN_WITH_TOTP_CODE` branches check the shape and nothing else,
- * because no RFC 6238 verifier is wired into it. A deployed pool computes the
- * code from the shared secret and would refuse this.
+ * Any six digits pass: the local pool checks authenticator-app codes only for
+ * their shape unless the block opts into `totpVerification: 'rfc6238'`, which
+ * this app does not. A deployed pool computes the code from the shared secret
+ * and would refuse this.
  */
 const TOTP_CODE = '000000';
 
@@ -92,30 +95,6 @@ type AuthState = Awaited<ReturnType<typeof AuthApiType.getAuthState>>;
  * on — nothing sweeps them on a timer, by design.
  */
 const RUN_STARTED_AT = new Date().toISOString();
-
-/**
- * Read the verification code the local Cognito mock just issued.
- *
- * The mock writes every generated code to `.bb-data/<blockId>/last-code.json`.
- * That file is an implementation detail of the installed mock, not a documented
- * interface, so a Building Block upgrade can move or drop it. The documented
- * alternative is the mock-only `codeDelivery` option on the block itself, which
- * would put a test hook into the production backend definition; reading the file
- * from the test keeps that out of `aws-blocks/index.ts`.
- */
-function readLastCode(username: string): string {
-  const root = join(process.cwd(), '.bb-data');
-  for (const dir of readdirSync(root)) {
-    try {
-      const raw = readFileSync(join(root, dir, 'last-code.json'), 'utf8');
-      const entry = JSON.parse(raw) as { username: string; code: string; purpose: string };
-      if (entry.username === username) return entry.code;
-    } catch {
-      // Not an auth block directory, or no code issued yet.
-    }
-  }
-  throw new Error(`No verification code found for ${username} under ${root}/`);
-}
 
 // ─── Setup (don't touch) ─────────────────────────────────────────────────────
 
@@ -179,13 +158,17 @@ async function drainReclamations(attempts: number) {
 }
 
 test.before(async () => {
-  // Use existing dev server if running, otherwise start one
-  if (!await devServerIsUp()) {
-    server = spawnDevServer();
-    await setTimeout(2000);
-  }
+  assert.ok(
+    !(await devServerIsUp()),
+    'A dev server is already running. The suite writes its accounts into the local user pool ' +
+      'before it starts its own server, and a running server would overwrite them. Stop it and run the suite again.',
+  );
+  addLocalUser(USERNAME, PASSWORD);
+  addLocalUser(ADMIN, ADMIN_PASSWORD);
+  server = spawnDevServer();
+  await setTimeout(2000);
 
-  const mod = await import('aws-blocks');
+  const mod = await import('cdk-blocks');
   api = mod.api;
   authApi = mod.authApi;
 
@@ -198,8 +181,9 @@ test.after(async () => {
   // `setTimeout`. A job the last delete submitted therefore dies with the
   // process, and the record it leaves behind names S3 objects that nothing then
   // sweeps: there is no periodic sweeper, so the orphan sits in
-  // `.bb-data` and shows up in every later run's `listPendingCleanups()`. In AWS
-  // the queue is SQS and outlives the Lambda, so this is a mock-only concern.
+  // `.cdk-blocks/local/data` and shows up in every later run's
+  // `listPendingCleanups()`. In AWS the queue is SQS and outlives the Lambda,
+  // so this is a mock-only concern.
   try {
     await signInAs(ADMIN, ADMIN_PASSWORD);
     const left = await drainReclamations(20);
@@ -222,25 +206,16 @@ test('auth: starts signed out', async () => {
   assert.strictEqual(state.state, 'signedOut');
 });
 
-test('auth: sign up requires code confirmation', async () => {
-  const state = await authApi.setAuthState({
-    action: 'signUp',
-    username: USERNAME,
-    password: PASSWORD,
-    // Confirm and sign in as separate steps so both are exercised.
-    autoSignIn: 'false',
-  });
-  assert.strictEqual(state.state, 'confirmingSignUp');
-});
-
-test('auth: confirming the code completes sign-up', async () => {
-  const state = await authApi.setAuthState({
-    action: 'confirmSignUp',
-    username: USERNAME,
-    code: readLastCode(USERNAME),
-  });
-  // Confirmed but not signed in — autoSignIn was declined above.
+test('auth: sign-up is refused', async () => {
+  // Sign-up is closed on every pool, this local one included, so an address
+  // nobody created an account for cannot make one. The pool answers as
+  // Cognito does on a pool that allows administrators alone to create users:
+  // `NotAuthorizedException`, and the visitor stays signed out.
+  const address = `e2e-signup-${Date.now().toString(36)}@example.com`;
+  const state = await authApi.setAuthState({ action: 'signUp', username: address, password: PASSWORD });
+  // The client sees the error name only; the pool's own wording stays on the server.
   assert.strictEqual(state.state, 'signedOut');
+  assert.strictEqual(state.errorName, 'NotAuthorizedException');
 });
 
 test('auth: a password alone does not sign the user in', async () => {
@@ -255,7 +230,9 @@ test('auth: a password alone does not sign the user in', async () => {
 
   const state = await passSecondFactor(challenged);
   assert.strictEqual(state.state, 'signedIn');
-  assert.strictEqual(state.user?.username, USERNAME);
+  // The pool signs in with the email address, so Cognito names the account
+  // with a generated id; the address is what the sign-in UI shows.
+  assert.strictEqual(state.user?.displayName, USERNAME);
 });
 
 test('auth: a wrong password is rejected', async () => {
@@ -296,29 +273,13 @@ test('me: unauthenticated access is rejected', async () => {
 //
 // The suite needs two identities: a global administrator and an ordinary user.
 // The administrator is a fixed address so that the records seeded for it in one
-// run still apply to the next; `.bb-data/` keeps both the account and the
-// permission records. The ordinary user is the per-run `USERNAME` created above,
-// so each run exercises a first-time sign-in and its JIT provisioning.
+// run still apply to the next; `.cdk-blocks/local/data/` keeps both the account
+// and the permission records. The ordinary user is the per-run `USERNAME`,
+// written into the pool before the server starts, so each run exercises a
+// first-time sign-in and its JIT provisioning.
 
 const ADMIN = 'admin@example.test';
 const ADMIN_PASSWORD = 'E2eAdminPass123!';
-
-/** Sign up and confirm the address unless a previous run already did. */
-async function ensureUser(username: string, password: string): Promise<void> {
-  const state = await authApi.setAuthState({
-    action: 'signUp',
-    username,
-    password,
-    autoSignIn: 'false',
-  });
-  if (state.state === 'confirmingSignUp') {
-    await authApi.setAuthState({
-      action: 'confirmSignUp',
-      username,
-      code: readLastCode(username),
-    });
-  }
-}
 
 async function signInAs(username: string, password: string): Promise<void> {
   const state = await passSecondFactor(
@@ -334,15 +295,15 @@ async function signInAs(username: string, password: string): Promise<void> {
 /**
  * Answer the TOTP challenge the pool raises, so a sign-in reaches `signedIn`.
  *
- * The pool is `mfa: 'required'` (`aws-blocks/resources.ts`), so a password is
+ * The pool is `mfa: 'required'` (`cdk-blocks/resources.ts`), so a password is
  * never the whole sign-in: the first one enrols an authenticator and every one
  * after it asks for a code. Both arrive as `confirmingSignIn`, and both are
  * answered the same way — hence the loop, which walks however many steps the
  * pool puts in the way rather than assuming two.
  *
- * The code is a constant because the mock accepts any six digits for TOTP; it
- * wires no RFC 6238 verifier, and its own comment says so. A deployed pool does
- * verify, which is one more reason this suite only runs against the mock.
+ * The code is a constant because the local pool accepts any six digits for
+ * TOTP (`TOTP_CODE`). A deployed pool does verify, which is one more reason
+ * this suite only runs against the mock.
  *
  * The payload is rebuilt from the fields the state itself carries. Every step
  * hides a different set behind `defaultValue` — `session` throughout, the
@@ -379,13 +340,12 @@ let roleGroupId = '';
 let memberUserId = '';
 
 test('bootstrap: seeding the table makes the first administrator', async () => {
-  await ensureUser(ADMIN, ADMIN_PASSWORD);
   await signInAs(ADMIN, ADMIN_PASSWORD);
 
   if (!(await api.me()).isGlobalAdmin) {
     // No API raises anyone's own permissions, so the four records go
     // in underneath the server, which then has to be restarted to read them.
-    // A previous run leaves them in `.bb-data/`, so this happens once per store.
+    // A previous run leaves them in `.cdk-blocks/local/data/`, so this happens once per store.
     assert.ok(
       server !== null,
       'This run reused a dev server it did not start, so it cannot restart that server to ' +
@@ -775,7 +735,7 @@ test('pages: saving keeps the old revision and makes the new one current', async
 
 test('pages: the client stamp is the one the server honours', async () => {
   // The stamp format lives twice — `stampOf` (src/features/pages/api/page-cache.ts) on the client,
-  // `bodyStamp` (aws-blocks/wiki-ops.ts) on the server — and nothing but this
+  // `bodyStamp` (cdk-blocks/wiki-ops.ts) on the server — and nothing but this
   // test ties them together. If one side changes alone there is no type error
   // and no other failing test; the symptom is a stale body rendered as current.
   // Imported here, not at the top: `src/features/pages/api/page-cache.ts` pulls in the API
@@ -1702,7 +1662,7 @@ test('assistant: signing out closes every assistant method', async () => {
 // That session is what authenticates here. Deployed, `/mcp` takes a Cognito
 // access token and nothing else; locally there is no user pool to verify one
 // against, so the endpoint falls back to the same session the UI uses (see
-// `authenticate` in `aws-blocks/mcp.ts`, which refuses to take that path inside
+// `authenticate` in `cdk-blocks/mcp.ts`, which refuses to take that path inside
 // Lambda). What the fallback cannot cover is the token layer itself — signature,
 // expiry, `client_id`, and the `slwiki/write` scope gate, which the local caller
 // is simply granted. Everything below the token — dispatch, tool arguments, and
@@ -2055,7 +2015,7 @@ test('mcp: a caller who reaches no space sees nothing and cannot write', async (
 // `/mcp` these are `RawRoute`s, so the tests reach them over `fetch`, and like
 // `/mcp` the local endpoint authenticates with the session cookie because there
 // is no user pool to verify a token against (see `authenticate` in
-// `aws-blocks/bearer-auth.ts`, which refuses that path inside Lambda). The token
+// `cdk-blocks/bearer-auth.ts`, which refuses that path inside Lambda). The token
 // layer — signature, expiry, `client_id`, the `slwiki/write` gate — is therefore
 // the one thing left to confirm in a sandbox; everything below it is the same
 // code deployed or not, and that is what these tests hold down.
@@ -2453,7 +2413,7 @@ test('ext: every method is registered with the mode its name promises', async ()
   // test here and fails only in production, as a `slwiki/read` token writing a
   // page. `ext.ts` builds Building Blocks at import and cannot be loaded in this
   // process, so the table it reads is checked instead (see `ext-methods.ts`).
-  const { EXT_METHOD_MODES } = await import('../aws-blocks/ext-methods.js');
+  const { EXT_METHOD_MODES } = await import('../cdk-blocks/ext-methods.js');
 
   assert.deepStrictEqual(EXT_METHOD_MODES, {
     listSpaces: 'read',
@@ -2529,7 +2489,7 @@ function memoryStore(spaceId: string, pages: ReturnType<typeof legacyPage>[]) {
 }
 
 test('the migration cuts a folder out of every page that holds children', async () => {
-  const { migrate, folderIdFor } = await import('../aws-blocks/scripts/migrate-folders.js');
+  const { migrate, folderIdFor } = await import('../cdk-blocks/scripts/migrate-folders.js');
   const store = memoryStore('s1', [
     legacyPage('s1', 'parent', 'Guides', undefined, '0000000001'),
     legacyPage('s1', 'child', 'Install', 'parent', '0000000005'),
@@ -2584,7 +2544,7 @@ test('the migration can be run twice', async () => {
   // An interrupted run is repeated rather than unwound, so a second pass over a
   // converted tree has to be a no-op. It is, because the folder ids are derived
   // from the page ids instead of drawn fresh.
-  const { migrate } = await import('../aws-blocks/scripts/migrate-folders.js');
+  const { migrate } = await import('../cdk-blocks/scripts/migrate-folders.js');
   const store = memoryStore('s2', [
     legacyPage('s2', 'p', 'Top', undefined, '0000000001'),
     legacyPage('s2', 'c', 'Under', 'p', '0000000003'),
@@ -2602,7 +2562,7 @@ test('the migration reports the depth it produced, and refuses to pass the cap',
   // A page holding children sits at level 9 at the deepest, because its child
   // was already at 10 — so the note this pushes down lands at 10. The report is
   // the check on that reasoning, not a decoration.
-  const { migrate } = await import('../aws-blocks/scripts/migrate-folders.js');
+  const { migrate } = await import('../cdk-blocks/scripts/migrate-folders.js');
   const chain = Array.from({ length: 10 }, (_, level) =>
     legacyPage(
       's3',
@@ -2813,15 +2773,15 @@ test('search: a deleted page is not returned', async () => {
 // ─── Federated sign-in (the stub identity provider) ──────────────────────────
 // `pnpm run dev` declares `stubIdp` — a real, in-process OIDC provider that
 // signs in a deterministic local identity instead of authenticating a human
-// (`aws-blocks/federation.ts`). Everything after the identity is settled is the
+// (`cdk-blocks/federation.ts`). Everything after the identity is settled is the
 // code a real IdP would reach: the same callback, the same session, the same
 // claim-to-role-group synchronisation.
 //
 // These tests run last because they leave the suite signed in as somebody else.
 
-const SSO_SIGN_IN_URL = 'http://localhost:3000/aws-blocks/auth/signin/sso';
-const SSO_SIGN_OUT_URL = 'http://localhost:3000/aws-blocks/auth/signout';
-/** The IdP group the stub identity claims, from `.bb-data/sl-wiki-sso/users.json`. */
+const SSO_SIGN_IN_URL = 'http://localhost:3000/cdk-blocks/auth/signin/sso';
+const SSO_SIGN_OUT_URL = 'http://localhost:3000/cdk-blocks/auth/signout';
+/** The IdP group the stub identity claims, from `.cdk-blocks/local/data/sl-wiki-sso/users.json`. */
 const STUB_IDP_GROUP = 'wiki-editors';
 
 let ssoSpaceId = '';

@@ -52,7 +52,7 @@ export type Placement = {
 /**
  * How the client names the body it holds.
  *
- * Must match `bodyStamp()` in `aws-blocks/wiki-ops.ts` character for character:
+ * Must match `bodyStamp()` in `cdk-blocks/wiki-ops.ts` character for character:
  * the server compares the string, not its parts.
  */
 export const stampOf = (page: { revision: number; updatedAt?: string }): string =>

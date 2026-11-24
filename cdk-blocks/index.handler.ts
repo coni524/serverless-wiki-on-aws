@@ -1,4 +1,4 @@
-import { createLambdaHandler } from '@aws-blocks/blocks/lambda-handler';
+import { createLambdaHandler } from 'aws-cdk-blocks/lambda-handler';
 
 // Passed as a lazy factory. A Building Block reads its settings from process.env
 // at import time, so a static import would load the backend before the settings

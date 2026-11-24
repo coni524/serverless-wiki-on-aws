@@ -10,7 +10,7 @@
  * permission before returning it, and a restored list would carry yesterday's
  * answer to that question.
  */
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import { type QueryKey } from '@tanstack/react-query';
 
 export const searchKey = (query: string, spaceId: string | null): QueryKey => [

@@ -10,10 +10,10 @@
  * returning. That includes search hits and anything the AI assistant or the MCP
  * server produces: there is no second filter downstream.
  */
-import { ApiError, isBlocksError, type BlocksContext } from '@aws-blocks/core';
-import { DistributedTableErrors } from '@aws-blocks/blocks';
+import { ApiError, isBlocksError, type BlocksContext } from '@aws-cdk-blocks/core';
+import { KVStoreErrors } from 'aws-cdk-blocks';
 
-import { auth, table } from './resources.js';
+import { auth, putItem, table, valuesOf } from './resources.js';
 import { readEpoch } from './epoch.js';
 import { canonicalUserId, oidcAuth } from './federation.js';
 import {
@@ -95,7 +95,7 @@ export function conflict(message: string): never {
  * — UI, AI assistant, or MCP — branch on the structured identity instead of
  * matching the human-facing message text, which is free to change or localise.
  * `ApiError` serialises `name` to the client, so `error.name` carries it across
- * the wire (see `@aws-blocks/core`'s `isBlocksError`).
+ * the wire (see `@aws-cdk-blocks/core`'s `isBlocksError`).
  */
 export const PAGE_HAS_CHILDREN = 'PageHasChildrenException';
 
@@ -104,7 +104,7 @@ export const PAGE_HAS_CHILDREN = 'PageHasChildrenException';
  *
  * `childCount` is for the callers that share this process and have to reword
  * the refusal — the AI assistant and the MCP server, via `leafOnlyDeleteRefusal`
- * in `refusals.ts`. It does not cross the wire: `@aws-blocks/core` serialises
+ * in `refusals.ts`. It does not cross the wire: `@aws-cdk-blocks/core` serialises
  * only `message`, `status`, `name` and `retriable`, so a browser still reads
  * the count out of the message text.
  */
@@ -277,16 +277,17 @@ export function requireAccess(context: BlocksContext): Promise<Access> {
 /**
  * Which of the two doors this request came through, and as whom.
  *
- * A deployment can have both open: `AuthCognito` for accounts holding a
- * password, `AuthOIDC` for accounts a company's IdP issued. They keep separate
- * sessions and separate cookies, so the only way to know is to ask each.
+ * A deployment can have both open: the `Auth` block `auth` for accounts
+ * holding a password, the `Auth` block `sso` for accounts a company's IdP
+ * issued. They keep separate sessions and separate cookies, so the only way to
+ * know is to ask each.
  *
  * Cognito is asked first because it is the door every deployment has — one
  * without an external IdP never reaches the second question at all. On a
  * federated deployment this costs one session lookup that misses before the one
  * that hits; `requireAccess` memoizes per request, so it is paid once.
  *
- * Both refusals are the same refusal. When neither session exists the Cognito
+ * Both refusals are the same refusal. When neither session exists the password
  * block is asked to raise it, so a signed-out client sees exactly the error it
  * saw before federation existed.
  */
@@ -304,8 +305,8 @@ async function whoIsSignedIn(context: BlocksContext): Promise<SignedInUser> {
     if (federated !== null) {
       return {
         userSub: canonicalUserId(federated.userId),
-        email: federated.email ?? federated.username,
-        identityProvider: federated.provider,
+        email: federated.attributes.email ?? federated.username,
+        identityProvider: federated.signInProvider,
       };
     }
   }
@@ -329,14 +330,14 @@ async function resolveAccess(context: BlocksContext): Promise<Access> {
   if (cached !== undefined) return accessFrom(signedIn, cached);
 
   // ── Hop 1: profile + memberships ──
-  let own = await Array.fromAsync(table.query({ where: { pk: { equals: userPk(userSub) } } }));
+  let own = await valuesOf(table.query({ where: { pk: { equals: userPk(userSub) } } }));
   let profile = own.find((item) => item.type === 'USER');
 
   let provisioned = false;
   if (profile === undefined) {
     await provisionUser(signedIn);
     provisioned = true;
-    own = await Array.fromAsync(table.query({ where: { pk: { equals: userPk(userSub) } } }));
+    own = await valuesOf(table.query({ where: { pk: { equals: userPk(userSub) } } }));
     profile = own.find((item) => item.type === 'USER');
   } else if (profile.email !== email) {
     // The address is the sign-in identity's own and can change during
@@ -379,7 +380,7 @@ export async function accessForUser(userSub: string): Promise<Access> {
   // Hop 1 runs even on a cache hit here, unlike the request path: there is no
   // session to read the display address from, and the profile is what carries it.
   // Hops 2 and 3 are still what the stored answer saves.
-  const own = await Array.fromAsync(table.query({ where: { pk: { equals: userPk(userSub) } } }));
+  const own = await valuesOf(table.query({ where: { pk: { equals: userPk(userSub) } } }));
   const profile = own.find((item) => item.type === 'USER');
   if (profile === undefined) forbidden('Unknown user');
   const user: SignedInUser = {
@@ -420,7 +421,7 @@ async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
   // ── Hop 2: user groups → role groups ──
   const attachments = await Promise.all(
     userGroupIds.map((id) =>
-      Array.fromAsync(
+      valuesOf(
         table.query({
           where: { pk: { equals: userGroupPk(id) }, sk: { beginsWith: 'RG#' } },
         }),
@@ -434,7 +435,7 @@ async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
   // ── Hop 3: role groups → grants ──
   const roleGroups = await Promise.all(
     roleGroupIds.map((id) =>
-      Array.fromAsync(table.query({ where: { pk: { equals: roleGroupPk(id) } } })),
+      valuesOf(table.query({ where: { pk: { equals: roleGroupPk(id) } } })),
     ),
   );
 
@@ -454,9 +455,9 @@ async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
 /**
  * Create the directory record for an account signing in for the first time.
  *
- * Cognito owns the password accounts and AuthCognito exposes no way to
- * enumerate them, so the directory is filled in here rather than at account
- * creation. A federated account normally has its record written a moment
+ * Cognito owns the password accounts, and the auth block is not given its
+ * `admin` surface, so nothing here can enumerate them: the directory is filled
+ * in here rather than at account creation. A federated account normally has its record written a moment
  * earlier, by the sign-in hook in `federation.ts`; this path still covers it,
  * because a session outlives the sign-in that created it and the directory row
  * could have been deleted since.
@@ -464,7 +465,7 @@ async function walkGroups(user: SignedInUser, own: Item[]): Promise<Access> {
 async function provisionUser(user: SignedInUser): Promise<void> {
   const { userSub, email, identityProvider } = user;
   const now = new Date().toISOString();
-  await table.put(
+  await putItem(
     {
       pk: userPk(userSub),
       sk: PROFILE,
@@ -488,10 +489,16 @@ async function provisionUser(user: SignedInUser): Promise<void> {
   // one place that owns the answer.
   if (identityProvider !== undefined) return;
 
-  const defaults = await table.get({ pk: CONFIG_PK, sk: CONFIG_DEFAULTS });
+  // An eventually consistent read: the setting changes rarely, it only decides
+  // the first membership of a new account, and a read that misses a change made
+  // a moment ago gives the account the group that was the default a moment ago.
+  const defaults = await table.get(
+    { pk: CONFIG_PK, sk: CONFIG_DEFAULTS },
+    { consistentRead: false },
+  );
   const defaultUserGroupId = defaults?.defaultUserGroupId;
   if (defaultUserGroupId !== undefined && defaultUserGroupId !== '') {
-    await table.put(
+    await putItem(
       {
         pk: userPk(userSub),
         sk: userGroupPk(defaultUserGroupId),
@@ -507,12 +514,10 @@ async function provisionUser(user: SignedInUser): Promise<void> {
 }
 
 async function syncEmail(profile: Item, email: string): Promise<void> {
-  await table
-    .put(
-      { ...profile, email, gsi1sk: sortable(email), version: (profile.version ?? 0) + 1 },
-      { ifFieldEquals: { version: profile.version ?? 0 } },
-    )
-    .catch(swallowConditionalFailure);
+  await putItem(
+    { ...profile, email, gsi1sk: sortable(email), version: (profile.version ?? 0) + 1 },
+    { ifFieldEquals: { version: profile.version ?? 0 } },
+  ).catch(swallowConditionalFailure);
 }
 
 /** Concurrent writers racing on an idempotent write is the expected outcome. */
@@ -522,7 +527,7 @@ export function swallowConditionalFailure(error: unknown): void {
 
 /** Matched through the block's constant; the wire name is its implementation detail. */
 export function isConditionalFailure(error: unknown): boolean {
-  return isBlocksError(error, DistributedTableErrors.ConditionalCheckFailed);
+  return isBlocksError(error, KVStoreErrors.ConditionalCheckFailed);
 }
 
 // ─── Gates ───────────────────────────────────────────────────────────────────
@@ -577,7 +582,7 @@ export function filterReadable<T extends { spaceId: string }>(access: Access, it
  */
 export async function readableSpaces(access: Access): Promise<Item[]> {
   if (access.isGlobalAdmin) {
-    return await Array.fromAsync(
+    return await valuesOf(
       table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_SPACES } } }),
     );
   }

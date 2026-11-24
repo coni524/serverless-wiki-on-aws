@@ -17,7 +17,7 @@ import {
   ssoProvidersJson,
   ssoSecretName,
   ssoSettingIds,
-} from '../../aws-blocks/sso-config.js';
+} from '../../cdk-blocks/sso-config.js';
 
 beforeEach(() => {
   for (const name of Object.keys(process.env)) {

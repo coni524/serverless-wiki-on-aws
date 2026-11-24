@@ -1,30 +1,16 @@
 packages:
-  - aws-blocks
+  - cdk-blocks
   - clients/*
 
 allowBuilds:
   esbuild: true
 
-# Security fixes for packages that reach the wiki only through the Agent block
-# (its Strands SDK serves AgentCore over express). The lockfile kept the
-# vulnerable versions because they still satisfy the ranges upstream declares.
-# Drop each entry once the Agent block resolves to a fixed version on its own.
-#
-# Not overridden: zod 3 under the Hosting block, which `pnpm audit` still
-# reports. No 3.x release carries the fix, and forcing zod 4 would break the
-# block's schema. Hosting runs only in the CDK synth, so this copy never reaches
-# a deployed function; the app's own zod is 4 and is fixed.
-overrides:
-  body-parser@<2.4.0: ^2.4.0
-  proxy-addr@<2.0.8: ^2.0.8
-  qs@<6.16.1: ^6.16.1
-
 patchedDependencies:
-  '@aws-blocks/bb-lambda-compute@0.7.0': patches/@aws-blocks__bb-lambda-compute@0.7.0.patch
+  '@aws-cdk-blocks/bb-lambda-compute@1.0.0': patches/@aws-cdk-blocks__bb-lambda-compute@1.0.0.patch
 
-# The aws-blocks/client.js that AWS Blocks generates imports @aws-blocks/bb-*
-# directly. Those are transitive dependencies of @aws-blocks/blocks, which pnpm's
-# strict node_modules layout does not resolve, so the @aws-blocks scope alone is
-# hoisted to the root node_modules.
+# The cdk-blocks/client.js that AWS CDK Blocks generates imports
+# @aws-cdk-blocks/bb-* directly. Those are transitive dependencies of
+# aws-cdk-blocks, which pnpm's strict node_modules layout does not resolve, so
+# the @aws-cdk-blocks scope alone is hoisted to the root node_modules.
 publicHoistPattern:
-  - '@aws-blocks/*'
+  - '@aws-cdk-blocks/*'

@@ -1,4 +1,4 @@
-import { deploy, getStackName } from '@aws-blocks/blocks/scripts';
+import { deploy, getStackName } from 'aws-cdk-blocks/scripts';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -15,13 +15,14 @@ const HOSTING_URL_OUTPUT = 'HostingHostingUrl';
  * The address this deployment is reached at, from the stack's outputs.
  *
  * Two settings need this address, and both go quiet when they do not get it.
- * `MCP_PUBLIC_ORIGIN` has to name the CloudFront distribution, because
- * CloudFront replaces the `Host` header on its way to the API and the Lambda
- * can no longer tell what the caller typed (`aws-blocks/mcp.ts`); without it
- * the stack deploys, the Wiki works, and only the OAuth metadata names an
- * endpoint nobody connected to. `CORS_ALLOWED_ORIGINS` has to name the origin
+ * `MCP_PUBLIC_ORIGIN` names the CloudFront distribution, so the OAuth metadata
+ * (`cdk-blocks/mcp.ts`) states the address clients connect to instead of
+ * inferring it from each request; the framework does report the address the
+ * client called behind the distribution, but stating it keeps the metadata
+ * right for any request that reaches the API some other way, and gives a
+ * custom domain one place to be named. `CORS_ALLOWED_ORIGINS` has to name the origin
  * the browser loads the Wiki from, because attachments travel straight from
- * the browser to the bucket over a presigned URL (`aws-blocks/resources.ts`);
+ * the browser to the bucket over a presigned URL (`cdk-blocks/resources.ts`);
  * without it the deploy still succeeds and the refusal waits until someone
  * attaches a file.
  *
@@ -40,7 +41,7 @@ function hostingOrigin(outputs: Map<string, string>): string {
       `Stack ${stackName} exists but has no ${HOSTING_URL_OUTPUT}* output. ` +
         'MCP_PUBLIC_ORIGIN cannot be resolved, and deploying without it would leave the ' +
         'MCP OAuth metadata naming the API Gateway URL. Pass MCP_PUBLIC_ORIGIN explicitly, ' +
-        'or fix the output lookup in aws-blocks/scripts/deploy.ts.',
+        'or fix the output lookup in cdk-blocks/scripts/deploy.ts.',
     );
   }
   return url.replace(/\/+$/, '');
@@ -121,7 +122,7 @@ try {
       throw new Error(
         'sso.config.json names identity providers but the deploy produced no UserPoolIssuerUrl / ' +
           'SsoAuthClientId outputs, so the federation settings cannot be resolved. The stack ' +
-          'and aws-blocks/index.cdk.ts disagree — fix that before deploying SSO.',
+          'and cdk-blocks/index.cdk.ts disagree — fix that before deploying SSO.',
       );
     }
     await runDeploy();

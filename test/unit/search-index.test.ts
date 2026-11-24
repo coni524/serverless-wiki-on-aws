@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { chunksOf } from '../../aws-blocks/search-index.js';
+import { chunksOf } from '../../cdk-blocks/search-index.js';
 
 test('a short body is one chunk', () => {
   assert.deepEqual(chunksOf('# 見出し\n\n本文'), ['# 見出し\n\n本文']);

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import Alert from '@cloudscape-design/components/alert';
 import Button from '@cloudscape-design/components/button';
 import Form from '@cloudscape-design/components/form';
@@ -16,7 +16,7 @@ import { errMessage } from '@/utils/errors';
  * `<img>`, which is a narrower set than the server stores.
  *
  * Two kinds of type are left out on purpose. `image/svg+xml` is absent from
- * `ALLOWED_CONTENT_TYPES` in `aws-blocks/index.ts` because an SVG can carry
+ * `ALLOWED_CONTENT_TYPES` in `cdk-blocks/index.ts` because an SVG can carry
  * script, so an uploaded one is served as an opaque download and no `<img>` will
  * ever draw it. HEIC, HEIF and TIFF are stored happily but Chrome and Firefox
  * decline to draw them. Either way the body would keep a reference to a picture

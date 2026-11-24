@@ -31,8 +31,8 @@
  * 2. The acting user comes from the verified token's `sub`, never from the
  *    request body. There is no tool parameter that names a user.
  */
-import { RawRoute } from '@aws-blocks/blocks';
-import { ApiError, type BlocksContext } from '@aws-blocks/core';
+import { RawRoute } from 'aws-cdk-blocks';
+import { ApiError, type BlocksContext } from '@aws-cdk-blocks/core';
 import { z } from 'zod';
 
 import { scope } from './resources.js';

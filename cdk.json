@@ -1,5 +1,5 @@
 {
-  "app": "pnpm exec tsx -C cdk aws-blocks/index.cdk.ts",
+  "app": "pnpm exec tsx -C cdk cdk-blocks/index.cdk.ts",
   "watch": {
     "include": [
       "**"
@@ -9,6 +9,8 @@
       "cdk*.json",
       "**/*.d.ts",
       "node_modules/**",
+      ".cdk-blocks-sandbox/**",
+      ".cdk-blocks/**",
       ".blocks-sandbox/**",
       "dist/**"
     ]

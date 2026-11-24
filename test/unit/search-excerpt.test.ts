@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { excerptOf, queryPhrases } from '../../aws-blocks/search-excerpt.js';
+import { excerptOf, queryPhrases } from '../../cdk-blocks/search-excerpt.js';
 
 /** The emphasized substrings, in order — what a reader would see in bold. */
 const emphasized = (text: string, query: string): string[] => {

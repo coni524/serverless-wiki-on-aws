@@ -3,14 +3,14 @@
  *
  * The tree is nothing but a parent reference per page. There is no denormalized
  * path, because moving a subtree would then rewrite every descendant, and
- * DistributedTable has no multi-item transaction: a half-finished move would
+ * the store has no multi-item transaction: a half-finished move would
  * leave part of the tree pointing at a path that no longer lists. Walking to
  * the root instead costs one `get()` per level, and the depth cap bounds it.
  *
  * Nothing here decides permissions. Every caller resolves the space first and
  * gates on it — see `access.ts`.
  */
-import { content, table } from './resources.js';
+import { content, keyOf, table, valuesOf } from './resources.js';
 import { reclaimJob } from './reclaim.js';
 import {
   CLEANUP_PK,
@@ -123,7 +123,7 @@ export async function childrenOf(
   parentPageId?: string,
   options?: { limit?: number; cursor?: string | null; order?: 'asc' | 'desc' },
 ): Promise<Item[]> {
-  return await Array.fromAsync(
+  return await valuesOf(
     table.query({
       index: 'gsi1',
       where: {
@@ -358,7 +358,7 @@ export async function promiseReclaim(prefixes: string[]): Promise<string[]> {
     prefix,
     createdAt,
   }));
-  await table.putBatch(records);
+  await table.putBatch(records.map((value) => ({ key: keyOf(value), value })));
   return records.map((record) => record.sk);
 }
 

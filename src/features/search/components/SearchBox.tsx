@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import Autosuggest from '@cloudscape-design/components/autosuggest';
 import { useT } from '@/lib/i18n';
 import { isTypedKey } from '@/utils/ime';

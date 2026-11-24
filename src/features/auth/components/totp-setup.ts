@@ -20,7 +20,7 @@
  * reaches the plain "enter your code" challenge that every later sign-in shows.
  */
 import qrcode from 'qrcode-generator';
-import type { Authenticator } from '@aws-blocks/blocks/ui';
+import type { Authenticator } from 'aws-cdk-blocks/ui';
 
 import { readStoredLocale } from '@/lib/i18n';
 import { messages } from '@/lib/i18n/dict';
@@ -28,7 +28,7 @@ import { messages } from '@/lib/i18n/dict';
 /**
  * The options `Authenticator` takes, read off the function itself.
  *
- * `@aws-blocks/blocks/ui` re-exports the component but not the type, and the
+ * `aws-cdk-blocks/ui` re-exports the component but not the type, and the
  * package that declares it is a transitive dependency this app does not name.
  */
 type AuthenticatorOptions = NonNullable<Parameters<typeof Authenticator>[1]>;

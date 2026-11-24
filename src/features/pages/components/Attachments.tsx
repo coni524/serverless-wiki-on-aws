@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import { useQuery } from '@tanstack/react-query';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';

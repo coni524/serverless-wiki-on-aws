@@ -7,7 +7,7 @@
  *
  * ─── Why it is not the MCP server, and not the UI API ───────────────────────
  * The UI-facing `ApiNamespace` has every operation a sync client needs, but its
- * authentication is the AuthCognito session cookie, which is issued in a browser
+ * authentication is the `Auth` block's session cookie, which is issued in a browser
  * and reaches nothing outside one. The MCP server has bearer authentication, but
  * its tools are deliberately narrowed for an AI caller: no move, no attachments,
  * and deletion limited to leaf pages. So the gap was never the operations, only
@@ -30,8 +30,8 @@
  * Plain JSON, no JSON-RPC envelope: the caller is a program that already knows
  * which method it wants, and an envelope would only add a layer to unwrap.
  */
-import { RawRoute } from '@aws-blocks/blocks';
-import { ApiError, type BlocksContext } from '@aws-blocks/core';
+import { RawRoute } from 'aws-cdk-blocks';
+import { ApiError, type BlocksContext } from '@aws-cdk-blocks/core';
 import { z } from 'zod';
 
 import { scope } from './resources.js';

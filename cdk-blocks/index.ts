@@ -1,8 +1,8 @@
 /**
- * Backend — aws-blocks/index.ts
+ * Backend — cdk-blocks/index.ts
  *
  * Defines the API. The frontend imports these exports directly via
- * `import { ... } from 'aws-blocks'`.
+ * `import { ... } from 'cdk-blocks'`.
  *
  * Building Block instances live in `resources.ts`, the stored shape and key
  * helpers in `model.ts`, and permission resolution in `access.ts`.
@@ -17,12 +17,12 @@
  * `requireSpace`, and management operations through `requireGlobalAdmin`.
  *
  * API reference for the installed versions: the README of each block under
- * node_modules/@aws-blocks/
+ * node_modules/@aws-cdk-blocks/
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { ApiNamespace } from '@aws-blocks/blocks';
+import { ApiNamespace } from 'aws-cdk-blocks';
 
-import { auth, scope, table } from './resources.js';
+import { auth, putItem, scope, table, valuesOf } from './resources.js';
 import {
   ALL_ROLE_GROUPS,
   ALL_SPACES,
@@ -193,7 +193,7 @@ function cleanDescription(value: string): string {
 
 /** Delete every item an index query returns. Re-running finishes a partial run. */
 async function deleteByIndex(gsi1pk: string, gsi1skPrefix?: string): Promise<void> {
-  const items = await Array.fromAsync(
+  const items = await valuesOf(
     table.query({
       index: 'gsi1',
       where: {
@@ -230,7 +230,7 @@ function asConflict(what: string) {
  * the same question the permission resolver asks, or it guards the wrong set.
  */
 async function adminUserGroupIds(): Promise<string[]> {
-  const attachments = await Array.fromAsync(
+  const attachments = await valuesOf(
     table.query({
       index: 'gsi1',
       where: {
@@ -259,7 +259,7 @@ async function adminsRemainWithout(drop: { userGroupId: string; userId?: string 
   );
   const memberships = await Promise.all(
     groupIds.map((id) =>
-      Array.fromAsync(
+      valuesOf(
         table.query({
           index: 'gsi1',
           where: { gsi1pk: { equals: userGroupPk(id) }, gsi1sk: { beginsWith: 'USER#' } },
@@ -283,7 +283,7 @@ const anyGlobalAdminRemains = () => adminsRemainWithout({ userGroupId: '' });
 
 /** Does this user group confer global administrator through any attachment? */
 async function reachesGlobalAdmin(userGroupId: string): Promise<boolean> {
-  const attachments = await Array.fromAsync(
+  const attachments = await valuesOf(
     table.query({
       where: { pk: { equals: userGroupPk(userGroupId) }, sk: { beginsWith: 'RG#' } },
     }),
@@ -480,7 +480,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async getAssistantConversation(conversationId: string) {
     const access = await requireAccess(context);
     await requireOwnConversation(access, conversationId);
-    const messages = await assistant.getConversation(conversationId);
+    const messages = await assistant.getConversation(conversationId, { userId: access.user.userSub });
     return {
       messages: withoutDiscardedReplies(
         messages
@@ -503,7 +503,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async getAssistantChannel(conversationId: string) {
     const access = await requireAccess(context);
     await requireOwnConversation(access, conversationId);
-    return await assistant.getChannel(conversationId);
+    return await assistant.getChannel(conversationId, { userId: access.user.userSub });
   },
 
   /**
@@ -528,7 +528,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async getAssistantPendingInterrupts(conversationId: string) {
     const access = await requireAccess(context);
     await requireOwnConversation(access, conversationId);
-    return { interrupts: await assistant.getPendingInterrupts(conversationId) };
+    return { interrupts: await assistant.getPendingInterrupts(conversationId, { userId: access.user.userSub }) };
   },
 
   // ─── Spaces ────────────────────────────────────────────────────────────────
@@ -542,7 +542,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listSpaces() {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const items = await Array.fromAsync(
+    const items = await valuesOf(
       table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_SPACES } } }),
     );
     return items.map(asSpace);
@@ -560,7 +560,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     requireGlobalAdmin(access);
     const name = cleanName(input.name);
     const spaceId = newId();
-    await table.put(
+    await putItem(
       {
         pk: spacePk(spaceId),
         sk: META,
@@ -586,22 +586,20 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     // Composed field by field rather than spread over `item`. A spread carries
     // whatever the stored record happens to hold, so the same shape copied to a
     // future `updateRoleGroup` would let a caller-supplied `global` through.
-    await table
-      .put(
-        {
-          pk: item.pk,
-          sk: item.sk,
-          type: 'SPACE',
-          gsi1pk: ALL_SPACES,
-          gsi1sk: sortable(name),
-          name,
-          description: cleanDescription(patch.description ?? item.description ?? ''),
-          createdAt: item.createdAt,
-          version: patch.version + 1,
-        },
-        { ifFieldEquals: { version: patch.version } },
-      )
-      .catch(asConflict('Space'));
+    await putItem(
+      {
+        pk: item.pk,
+        sk: item.sk,
+        type: 'SPACE',
+        gsi1pk: ALL_SPACES,
+        gsi1sk: sortable(name),
+        name,
+        description: cleanDescription(patch.description ?? item.description ?? ''),
+        createdAt: item.createdAt,
+        version: patch.version + 1,
+      },
+      { ifFieldEquals: { version: patch.version } },
+    ).catch(asConflict('Space'));
     return { version: patch.version + 1 };
   },
 
@@ -641,7 +639,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     // round is a complete unit of work, so a timeout only costs the rounds not
     // yet done. Re-invoking finishes the job.
     for (;;) {
-      const batch = await Array.fromAsync(
+      const batch = await valuesOf(
         table.query({
           where: { pk: { equals: spacePk(spaceId) }, sk: { beginsWith: PAGE_SK_PREFIX } },
           limit: 100,
@@ -850,7 +848,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     requireGlobalAdmin(access);
     const pageSize = 100;
     const from = given(cursor);
-    const items = await Array.fromAsync(
+    const items = await valuesOf(
       table.query({
         where: {
           pk: { equals: CLEANUP_PK },
@@ -887,7 +885,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listSpaceRoleGroups(spaceId: string) {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const grants = await Array.fromAsync(
+    const grants = await valuesOf(
       table.query({ index: 'gsi1', where: { gsi1pk: { equals: spacePk(spaceId) } } }),
     );
     return grants.map((item) => ({
@@ -902,7 +900,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     if (!PERMISSIONS.includes(permission)) invalid(`Unknown permission: ${permission}`);
     await requireItem(spacePk(spaceId), META, 'Space');
     await requireItem(roleGroupPk(roleGroupId), META, 'Role group');
-    await table.put({
+    await putItem({
       pk: roleGroupPk(roleGroupId),
       sk: spacePk(spaceId),
       type: 'GRANT',
@@ -929,7 +927,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listUserGroups() {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const items = await Array.fromAsync(
+    const items = await valuesOf(
       table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_USER_GROUPS } } }),
     );
     return items.map(asGroup);
@@ -940,7 +938,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     requireGlobalAdmin(access);
     const name = cleanName(input.name);
     const userGroupId = newId();
-    await table.put(
+    await putItem(
       {
         pk: userGroupPk(userGroupId),
         sk: META,
@@ -989,7 +987,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     // not leave every execution environment serving the old answer until the
     // backstop expires. The same reasoning as in `deleteSpace`.
     await bumpEpoch();
-    const attachments = await Array.fromAsync(
+    const attachments = await valuesOf(
       table.query({
         where: { pk: { equals: userGroupPk(userGroupId) }, sk: { beginsWith: 'RG#' } },
       }),
@@ -1004,7 +1002,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listUserGroupMembers(userGroupId: string) {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const memberships = await Array.fromAsync(
+    const memberships = await valuesOf(
       table.query({
         index: 'gsi1',
         where: { gsi1pk: { equals: userGroupPk(userGroupId) }, gsi1sk: { beginsWith: 'USER#' } },
@@ -1028,7 +1026,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listUserGroupRoleGroups(userGroupId: string) {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const attachments = await Array.fromAsync(
+    const attachments = await valuesOf(
       table.query({
         where: { pk: { equals: userGroupPk(userGroupId) }, sk: { beginsWith: 'RG#' } },
       }),
@@ -1041,7 +1039,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     requireGlobalAdmin(access);
     await requireItem(userGroupPk(userGroupId), META, 'User group');
     await requireItem(userPk(userId), PROFILE, 'User');
-    await table.put({
+    await putItem({
       pk: userPk(userId),
       sk: userGroupPk(userGroupId),
       type: 'MEMBERSHIP',
@@ -1071,13 +1069,13 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     await table.delete({ pk: userPk(userId), sk: userGroupPk(userGroupId) });
     await bumpEpoch();
 
-    // Check-then-delete is not atomic, and DistributedTable has no multi-item
+    // Check-then-delete is not atomic, and the store has no multi-item
     // transaction. Two concurrent removals can both see two administrators and
     // both proceed, emptying the role. Counting again afterwards catches that,
     // and the membership is put back — an environment with no administrator has
     // no way back, because the bootstrap claim is spent.
     if (guarded && membership !== null && !(await anyGlobalAdminRemains())) {
-      await table.put(membership, { ifNotExists: true }).catch(swallowConditionalFailure);
+      await putItem(membership, { ifNotExists: true }).catch(swallowConditionalFailure);
       // The restore is itself an edge write, so it moves the generation again.
       await bumpEpoch();
       conflict('That removal would have left no global administrator; it was undone');
@@ -1090,7 +1088,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listRoleGroups() {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const items = await Array.fromAsync(
+    const items = await valuesOf(
       table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_ROLE_GROUPS } } }),
     );
     return items.map(asGroup);
@@ -1101,7 +1099,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     requireGlobalAdmin(access);
     const name = cleanName(input.name);
     const roleGroupId = newId();
-    await table.put(
+    await putItem(
       {
         pk: roleGroupPk(roleGroupId),
         sk: META,
@@ -1143,7 +1141,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     // As in `deleteUserGroup`: the attachments are already gone, so the epoch
     // moves before the steps that may fail, not after them.
     await bumpEpoch();
-    const grants = await Array.fromAsync(
+    const grants = await valuesOf(
       table.query({
         where: { pk: { equals: roleGroupPk(roleGroupId) }, sk: { beginsWith: 'SPACE#' } },
       }),
@@ -1158,7 +1156,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listRoleGroupGrants(roleGroupId: string) {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const grants = await Array.fromAsync(
+    const grants = await valuesOf(
       table.query({
         where: { pk: { equals: roleGroupPk(roleGroupId) }, sk: { beginsWith: 'SPACE#' } },
       }),
@@ -1269,16 +1267,14 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
       await bumpEpoch();
     }
 
-    await table
-      .put(
-        {
-          ...group,
-          idpGroups: deduped.length > 0 ? deduped : undefined,
-          version: version + 1,
-        },
-        { ifFieldEquals: { version } },
-      )
-      .catch(asConflict('Role group'));
+    await putItem(
+      {
+        ...group,
+        idpGroups: deduped.length > 0 ? deduped : undefined,
+        version: version + 1,
+      },
+      { ifFieldEquals: { version } },
+    ).catch(asConflict('Role group'));
     return { roleGroupId, idpGroups: deduped, version: version + 1 };
   },
 
@@ -1293,7 +1289,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listRoleGroupMembers(roleGroupId: string) {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const members = await Array.fromAsync(
+    const members = await valuesOf(
       table.query({
         index: 'gsi1',
         where: { gsi1pk: { equals: roleGroupPk(roleGroupId) }, gsi1sk: { beginsWith: 'USER#' } },
@@ -1335,7 +1331,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   async listRoleGroupUserGroups(roleGroupId: string) {
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
-    const attachments = await Array.fromAsync(
+    const attachments = await valuesOf(
       table.query({
         index: 'gsi1',
         where: { gsi1pk: { equals: roleGroupPk(roleGroupId) }, gsi1sk: { beginsWith: 'UG#' } },
@@ -1349,7 +1345,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     requireGlobalAdmin(access);
     await requireItem(userGroupPk(userGroupId), META, 'User group');
     await requireItem(roleGroupPk(roleGroupId), META, 'Role group');
-    await table.put({
+    await putItem({
       pk: userGroupPk(userGroupId),
       sk: roleGroupPk(roleGroupId),
       type: 'ATTACHMENT',
@@ -1406,7 +1402,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     // `beginsWith` and `greaterThan` are both sort-key conditions and DynamoDB
     // takes only one, so a cursor-driven page filters the prefix in memory. The
     // over-read is bounded by one page.
-    const items = await Array.fromAsync(
+    const items = await valuesOf(
       table.query({
         index: 'gsi1',
         where: {
@@ -1469,18 +1465,16 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
 
     const existing = await table.get({ pk: CONFIG_PK, sk: CONFIG_DEFAULTS });
     if ((existing?.version ?? 0) !== version) conflict('Defaults changed since they were read');
-    await table
-      .put(
-        {
-          pk: CONFIG_PK,
-          sk: CONFIG_DEFAULTS,
-          type: 'CONFIG',
-          defaultUserGroupId: defaultUserGroupId ?? undefined,
-          version: version + 1,
-        },
-        existing === null ? { ifNotExists: true } : { ifFieldEquals: { version } },
-      )
-      .catch(asConflict('Defaults'));
+    await putItem(
+      {
+        pk: CONFIG_PK,
+        sk: CONFIG_DEFAULTS,
+        type: 'CONFIG',
+        defaultUserGroupId: defaultUserGroupId ?? undefined,
+        version: version + 1,
+      },
+      existing === null ? { ifNotExists: true } : { ifFieldEquals: { version } },
+    ).catch(asConflict('Defaults'));
     return { defaultUserGroupId, version: version + 1 };
   },
 }));

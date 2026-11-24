@@ -2,7 +2,9 @@
 
 pnpm applies these to `node_modules` on install; `pnpm-workspace.yaml` lists them under `patchedDependencies`.
 
-## `@aws-blocks__bb-lambda-compute@0.7.0.patch`
+A patch is made with `pnpm patch <package>@<version>` and `pnpm patch-commit <dir>`. Delete the `index <hash>..<hash>` line that `patch-commit` writes before committing (the pre-commit hook refuses it), then run `pnpm install` so the lockfile records the edited file's hash. When the package's version changes, the patch is made again for the new version.
+
+## `@aws-cdk-blocks__bb-lambda-compute@1.0.0.patch`
 
 Sets `bundleAwsSDK: true` on the shared Lambda function, so the `@aws-sdk/*` clients in `package.json` are bundled into the function instead of being taken from the Lambda runtime.
 

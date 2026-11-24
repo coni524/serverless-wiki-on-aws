@@ -22,7 +22,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, S3 Vectors, CloudFront,
 - There are no always-on, always-billing resources
 - It syncs both ways with Obsidian on your machine
 - The Bedrock assistant and the MCP server go through the same permission check as the UI
-- Built with AWS Blocks
+- Built with AWS CDK Blocks
 
 ## Features
 
@@ -36,7 +36,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, S3 Vectors, CloudFront,
 - Obsidian plugin that syncs a vault and a space in both directions
 - Attachments delivered through presigned URLs; the bucket blocks all public access
 - Japanese and English UI, switched in the header
-- Infrastructure defined with [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks), an Infrastructure-from-Code framework
+- Infrastructure defined with [AWS CDK Blocks](https://www.npmjs.com/package/aws-cdk-blocks), an Infrastructure-from-Code framework
 
 ## Architecture
 
@@ -74,7 +74,7 @@ The deployed stack is Lambda, API Gateway, DynamoDB, S3, S3 Vectors, CloudFront,
 
 ## Quick Start
 
-No AWS account is needed. Every Building Block runs mocked on your machine, and the mock data lands in `.bb-data/`.
+No AWS account is needed. Every Building Block runs mocked on your machine, and the mock data lands in `.cdk-blocks/local/data/`.
 
 ```bash
 pnpm install
@@ -83,7 +83,15 @@ pnpm run dev
 
 **Open your browser:** Navigate to [http://localhost:3000](http://localhost:3000).
 
-The local mock accepts sign-up, so create an account on that screen and sign in. Permission checks work as in production, so a brand-new account belongs to no group and sees no spaces. Make yourself an administrator the same way a real deployment does. The dev server rewrites the local data file, so stop it first.
+Sign-up is closed here too, as on a deployed stack, so create your local account first, with the dev server stopped (it rewrites the local data files). Without `--password`, a password is generated and printed. The first sign-in asks you to set up an authenticator app; the local pool accepts any 6 digits.
+
+```bash
+# Ctrl-C the dev server, then
+pnpm run local:add-user -- --email you@example.test
+pnpm run dev
+```
+
+Permission checks work as in production, so a brand-new account belongs to no group and sees no spaces. After your first sign-in, make yourself an administrator the same way a real deployment does, again with the dev server stopped.
 
 ```bash
 # Ctrl-C the dev server, then
@@ -227,7 +235,7 @@ The bundled plugin in `clients/obsidian/` syncs an Obsidian vault with the space
 
 ```
 serverless-wiki-on-aws/
-├── aws-blocks/           # Backend
+├── cdk-blocks/           # Backend
 │   ├── index.cdk.ts      # CDK app; resources.ts declares the Building Blocks
 │   ├── index.ts          # API surface the frontend calls
 │   ├── access.ts         # Permission resolution
@@ -257,7 +265,7 @@ serverless-wiki-on-aws/
 
 ## Learn More
 
-- [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks) — the Infrastructure-from-Code framework this project is built on
+- [AWS CDK Blocks](https://github.com/aws/cdk-blocks) — the Infrastructure-from-Code framework this project is built on
 - [Amazon S3 Vectors hybrid search](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-hybrid-search.html) — the search backend
 - [Model Context Protocol](https://modelcontextprotocol.io/) — the protocol the `/mcp` endpoint speaks
 - [Cloudscape Design System](https://cloudscape.design/) — the UI components

@@ -7,7 +7,7 @@
 #
 # The AI assistant's agent loop is the exception: the Agent block runs it on an
 # AgentCore Runtime with Node 22, and that runtime imports the same backend
-# module. Backend code under aws-blocks/ therefore sticks to APIs Node 22 has.
+# module. Backend code under cdk-blocks/ therefore sticks to APIs Node 22 has.
 #
 # pnpm is pinned to the major that `packageManager` in package.json declares.
 [tools]

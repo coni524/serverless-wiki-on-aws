@@ -2,14 +2,20 @@
  * Sign-in through an external identity provider.
  *
  * The Wiki answers to two kinds of account, and both live in the same Cognito
- * user pool. One holds a password in the pool and is served by `AuthCognito`
- * in `resources.ts`. The other is issued by a company's own IdP — OneLogin,
- * Okta, Entra — which `index.cdk.ts` registers on that same pool as an OIDC
- * identity provider. The `AuthOIDC` block here does not talk to that IdP: it
- * points at the pool's own issuer URL, whose hosted sign-in domain forwards to
- * the IdP and creates the federated account in the pool on the way back. What
- * this block receives is a Cognito-issued ID token, whichever IdP stood behind
- * it.
+ * user pool. One holds a password in the pool and is served by the `Auth`
+ * block `auth` in `resources.ts`. The other is issued by a company's own IdP —
+ * OneLogin, Okta, Entra — which `index.cdk.ts` registers on that same pool as
+ * an OIDC identity provider. The `Auth` block here (`store: 'builtin'`) does
+ * not talk to that IdP: its providers point at the pool's own issuer URL,
+ * whose hosted sign-in domain forwards to the IdP and creates the federated
+ * account in the pool on the way back. What this block receives is a
+ * Cognito-issued ID token, whichever IdP stood behind it.
+ *
+ * The block is deliberately not given the pool to federate through itself
+ * (a default-store block with `type: 'oidc'` providers). That would make it
+ * create its own hosted-UI client and domain and its own IdP registrations,
+ * and the accounts it created would be named by a different identifier than
+ * the ones the permission records already point at.
  *
  * Both kinds land in the same permission model under the same identifier — the
  * pool's `sub`. `access.ts` reads whichever session exists and hands the
@@ -30,13 +36,13 @@
  * authorization path this project is built on — a claim cannot become a second
  * way to be permitted.
  */
-import { AppSetting, AuthOIDC, customOidc, getDeploymentType, stubIdp } from '@aws-blocks/blocks';
-import type { OIDCUser } from '@aws-blocks/blocks';
-import { ApiError } from '@aws-blocks/core';
+import { AppSetting, Auth, getDeploymentType, stubIdp } from 'aws-cdk-blocks';
+import type { AuthenticatedUser, BuiltinProvider } from 'aws-cdk-blocks';
+import { ApiError } from '@aws-cdk-blocks/core';
 
 import { runtimeSsoProviders, ssoSettingIds } from './sso-config.js';
 import { DEPLOYED } from './deployed.js';
-import { scope, table } from './resources.js';
+import { putItem, scope, table, valuesOf } from './resources.js';
 import { bumpEpoch } from './epoch.js';
 import {
   ALL_ROLE_GROUPS,
@@ -114,20 +120,50 @@ const SCOPES = (process.env.SSO_SCOPES ?? '')
 const USE_STUB = process.env.SSO_STUB === 'true' && !DEPLOYED;
 
 /**
- * The credentials of the pool's federation app client.
+ * The secret of the pool's federation app client, for the primary provider.
  *
  * Not the external IdP's credentials — those are read by the identity provider
  * registration in `index.cdk.ts` and never reach the runtime. What this block
  * authenticates to is the pool's own token endpoint, as the confidential app
- * client the CDK creates for it; the deploy scripts read that client's id and
- * secret back from Cognito after each deploy and write them here, so no
- * operator ever handles them. Stored settings rather than deploy-time values
- * because the block resolves them on the first sign-in each execution
- * environment serves, which is what lets the deploy script fill them in after
- * the stack — including the client — already exists.
+ * client the CDK creates for it; the deploy scripts read that client's secret
+ * back from Cognito after each deploy and write it here, so no operator ever
+ * handles it. A stored setting rather than a deploy-time value because the
+ * block resolves it on the first sign-in each execution environment serves,
+ * which is what lets the deploy script fill it in after the stack — including
+ * the client — already exists.
+ *
+ * The client's id is not a secret and the block needs it as a plain string
+ * when the provider is declared, so it travels with the deploy-time values
+ * instead (`SSO_CLIENT_IDS` below).
  */
-export const ssoClientId = new AppSetting(scope, 'sso-client-id', { secret: true });
 export const ssoClientSecret = new AppSetting(scope, 'sso-client-secret', { secret: true });
+
+/**
+ * Each provider's federation app client id, by provider name.
+ *
+ * Resolved by the deploy scripts from the stack outputs, after the client
+ * exists, and forwarded to the backend the same way as `SSO_ISSUER_URL`. A
+ * provider whose client id is not known yet is not declared: the deploy that
+ * adds an entry creates its client on the first pass and declares the
+ * provider on the second, as it did before the id became deploy-time.
+ */
+const CLIENT_IDS = parseClientIds(process.env.SSO_CLIENT_IDS);
+
+/** The `SSO_CLIENT_IDS` value: a JSON object of provider name to client id. */
+export function parseClientIds(raw: string | undefined): ReadonlyMap<string, string> {
+  const text = (raw ?? '').trim();
+  if (text === '') return new Map();
+  const parsed: unknown = JSON.parse(text);
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !Object.values(parsed).every((value) => typeof value === 'string' && value !== '')
+  ) {
+    throw new Error('SSO_CLIENT_IDS is not the object the deploy script writes. Redeploy rather than hand-edit.');
+  }
+  return new Map(Object.entries(parsed as Record<string, string>));
+}
 
 /**
  * The providers this deployment was synthesised with — names and labels,
@@ -137,70 +173,71 @@ export const ssoClientSecret = new AppSetting(scope, 'sso-client-secret', { secr
 const RUNTIME_PROVIDERS = runtimeSsoProviders();
 
 /**
- * Each provider's federation-client credentials. The primary entry reads the
- * unconditional pair above (its ids predate multi-IdP support); every other
- * provider gets a pair of its own, named after it, which the deploy script
- * fills the same way.
+ * Each provider's federation-client secret. The primary entry reads the
+ * unconditional setting above (its id predates multi-IdP support); every other
+ * provider gets one of its own, named after it, which the deploy script fills
+ * the same way.
  */
-const credentialSettings = new Map(
-  RUNTIME_PROVIDERS.map((provider) => {
-    if (provider.primary) {
-      return [provider.name, { clientId: ssoClientId, clientSecret: ssoClientSecret }] as const;
-    }
-    const ids = ssoSettingIds(provider);
-    return [
-      provider.name,
-      {
-        clientId: new AppSetting(scope, ids.clientId, { secret: true }),
-        clientSecret: new AppSetting(scope, ids.clientSecret, { secret: true }),
-      },
-    ] as const;
-  }),
+const secretSettings = new Map(
+  RUNTIME_PROVIDERS.map((provider) => [
+    provider.name,
+    provider.primary
+      ? ssoClientSecret
+      : new AppSetting(scope, ssoSettingIds(provider).clientSecret, { secret: true }),
+  ]),
 );
 
+/** The providers that can be declared: those whose client id is already known. */
+const READY_PROVIDERS =
+  ISSUER_URL !== '' ? RUNTIME_PROVIDERS.filter((provider) => CLIENT_IDS.has(provider.name)) : [];
+
 /**
- * The configured providers, in the order the sign-in screen shows them.
+ * The configured providers, keyed by name, in the order the sign-in screen
+ * shows them.
  *
  * Every entry points at the same issuer — the pool — and differs in name and
  * credentials: each external IdP stands behind an app client of its own, so
  * the hosted UI forwards a sign-in straight to its IdP instead of drawing a
  * chooser.
  */
-const providers =
+const providers: Record<string, BuiltinProvider> =
   ISSUER_URL !== ''
-    ? RUNTIME_PROVIDERS.map((provider) => {
-        // A configured issuer is talked to in every environment, local
-        // development included. Pointing a developer's machine at the real
-        // pool is a matter of registering `http://localhost:3000/...` on the
-        // pool's federation app clients, and getting that wrong should fail
-        // loudly rather than be papered over by a stub that signs anybody in.
-        const credentials = credentialSettings.get(provider.name)!;
-        return customOidc({
-          name: provider.name,
-          issuerUrl: ISSUER_URL,
-          clientId: () => credentials.clientId.get(),
-          clientSecret: () => credentials.clientSecret.get(),
-          ...(SCOPES.length > 0 ? { scopes: SCOPES } : {}),
-        });
-      })
+    ? Object.fromEntries(
+        READY_PROVIDERS.map((provider) => [
+          provider.name,
+          {
+            // A configured issuer is talked to in every environment, local
+            // development included. Pointing a developer's machine at the real
+            // pool is a matter of registering `http://localhost:3000/...` on
+            // the pool's federation app clients, and getting that wrong should
+            // fail loudly rather than be papered over by a stub that signs
+            // anybody in.
+            type: 'oidc',
+            issuer: ISSUER_URL,
+            clientId: CLIENT_IDS.get(provider.name)!,
+            clientSecret: secretSettings.get(provider.name)!,
+            label: provider.label,
+            ...(SCOPES.length > 0 ? { scopes: SCOPES } : {}),
+          },
+        ]),
+      )
     : USE_STUB
-      ? [
-          stubIdp({
-            // The name becomes the sign-in path segment
-            // (`/aws-blocks/auth/signin/sso`), matching what a real deployment
-            // calls its primary provider.
-            name: 'sso',
+      ? {
+          // The key becomes the sign-in path segment
+          // (`/cdk-blocks/auth/signin/sso`), matching what a real deployment
+          // calls its primary provider.
+          sso: stubIdp({
             // Sign in as the first local identity instead of drawing an account
             // picker. The picker is the block's default and is the more
             // realistic shape, but there is nobody to click it in the e2e
             // suite, and a federated sign-in that no test can drive is the part
             // of this feature most worth testing left untested. Which identity
             // that is, and what groups it claims, comes from
-            // `.bb-data/<id>/users.json` — the suite writes one.
+            // `.cdk-blocks/local/data/<id>/users.json` — the suite writes one.
             onAuthorize: (request) => request.users[0],
           }),
-        ]
-      : [];
+        }
+      : {};
 
 /**
  * Which providers this deployment can sign a user in with.
@@ -208,39 +245,45 @@ const providers =
  * The sign-in screen reads this through the API and draws one button per entry,
  * so turning federation on or off changes the screen without rebuilding the
  * frontend. Empty means the password form is the only way in. The label is the
- * operator's `SSO_IDP[_<n>]_LABEL`, or the name; the stub answers with its
+ * entry's `label` in `sso.config.json`, or the name; the stub answers with its
  * name, which is all it has.
  */
 export const federationProviders: ReadonlyArray<{ name: string; label: string }> =
   ISSUER_URL !== ''
-    ? RUNTIME_PROVIDERS.map(({ name, label }) => ({ name, label }))
-    : providers.map((provider) => ({ name: provider.name, label: provider.name }));
+    ? READY_PROVIDERS.map(({ name, label }) => ({ name, label }))
+    : Object.keys(providers).map((name) => ({ name, label: name }));
 
 // ─── The block ───────────────────────────────────────────────────────────────
 
 /**
  * The OIDC sign-in gate, or `null` on a deployment with no external IdP.
  *
- * Null rather than an instance with an empty provider list, because the block
- * refuses to be constructed without a provider — it throws `AuthOIDC requires
- * at least one provider`. This module is imported by `access.ts`, and
- * `access.ts` by every request path, so an instance built unconditionally would
- * take the whole backend down at synth on any deployment that never asked for
- * federation.
+ * Null rather than an instance with an empty provider map, because a
+ * `store: 'builtin'` block refuses to be constructed without a provider. This
+ * module is imported by `access.ts`, and `access.ts` by every request path, so
+ * an instance built unconditionally would take the whole backend down at
+ * synth on any deployment that never asked for federation.
  *
  * Every caller therefore checks. There is exactly one (`access.ts`), and it was
  * already branching on whether federation is configured at all.
+ *
+ * The id `sso` and the scope are fixed: they name the block's session table.
+ * It keeps the default `redirects`, because the password block in
+ * `resources.ts` has no providers and so mounts no sign-in routes of its own.
  */
 export const oidcAuth =
-  providers.length > 0
-    ? new AuthOIDC(scope, 'sso', {
+  Object.keys(providers).length > 0
+    ? new Auth(scope, 'sso', {
+        store: 'builtin',
         providers,
-        onSignIn: (user, _context) => syncRoleGroups(user),
-        // Matches `AuthCognito` in `resources.ts`: in a sandbox the frontend is
-        // served from localhost while the API answers from API Gateway, which
-        // are different registrable domains, and a `SameSite=Lax` cookie would
-        // not survive the round trip.
-        crossDomain: getDeploymentType() === 'sandbox',
+        onSignIn: (user) => syncRoleGroups(user),
+        session: {
+          // Matches the password block in `resources.ts`: in a sandbox the
+          // frontend is served from localhost while the API answers from API
+          // Gateway, which are different registrable domains, and a
+          // `SameSite=Lax` cookie would not survive the round trip.
+          crossDomain: getDeploymentType() === 'sandbox',
+        },
       })
     : null;
 
@@ -435,22 +478,24 @@ export function hasEffectivePermission(
  * Throwing here fails the sign-in and sets no cookie, which is deliberate: a
  * session whose permissions could not be established should not exist.
  */
-async function syncRoleGroups(user: OIDCUser): Promise<void> {
+async function syncRoleGroups(user: AuthenticatedUser): Promise<void> {
   const userId = canonicalUserId(user.userId);
   // The same fallback `access.ts` uses when it reads a federated session. Two
   // different ones would fight: an IdP that supplies no address would have this
   // write the empty string, the next request write the display name, and the
   // next sign-in write the empty string again — rewriting the directory's sort
   // key, and reordering the account list, on every round.
-  const email = user.email ?? user.username;
+  const email = user.attributes.email ?? user.username;
+  // The provider key in this block's `providers`: the configured name.
+  const provider = user.signInProvider;
 
   const [own, roleGroups] = await Promise.all([
-    Array.fromAsync(table.query({ where: { pk: { equals: userPk(userId) } } })),
-    Array.fromAsync(table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_ROLE_GROUPS } } })),
+    valuesOf(table.query({ where: { pk: { equals: userPk(userId) } } })),
+    valuesOf(table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_ROLE_GROUPS } } })),
   ]);
 
   const wanted = new Set(
-    roleGroupsForIdpGroups(roleGroups, user.provider, groupsFromClaims(user.claims, GROUPS_CLAIM)),
+    roleGroupsForIdpGroups(roleGroups, provider, groupsFromClaims(user.claims ?? {}, GROUPS_CLAIM)),
   );
   const held = new Set(
     own.filter((item) => item.type === 'ROLE_MEMBERSHIP').map((item) => idOf(item.sk)),
@@ -490,20 +535,20 @@ async function syncRoleGroups(user: OIDCUser): Promise<void> {
     );
   }
 
-  await writeProfile(own, userId, email, user.provider);
+  await writeProfile(own, userId, email, provider);
 
   if (toAdd.length > 0) {
     const at = new Date().toISOString();
     await Promise.all(
       toAdd.map((roleGroupId) =>
-        table.put({
+        putItem({
           pk: userPk(userId),
           sk: roleGroupPk(roleGroupId),
           type: 'ROLE_MEMBERSHIP',
           gsi1pk: roleGroupPk(roleGroupId),
           gsi1sk: userPk(userId),
           addedAt: at,
-          addedBy: `idp:${user.provider}`,
+          addedBy: `idp:${provider}`,
         }),
       ),
     );
@@ -536,7 +581,7 @@ async function writeProfile(
   const profile = own.find((item) => item.type === 'USER');
 
   if (profile === undefined) {
-    await table.put({
+    await putItem({
       pk: userPk(userId),
       sk: PROFILE,
       type: 'USER',
@@ -551,19 +596,17 @@ async function writeProfile(
   }
 
   if (profile.email === email && profile.identityProvider === provider) return;
-  await table
-    .put(
-      {
-        ...profile,
-        email,
-        gsi1sk: sortable(email),
-        identityProvider: provider,
-        version: (profile.version ?? 0) + 1,
-      },
-      { ifFieldEquals: { version: profile.version ?? 0 } },
-    )
-    // A concurrent sign-in in another tab writing the same values is the
-    // expected loser here, and the display address is not worth a failed
-    // sign-in.
-    .catch(() => undefined);
+  // A concurrent sign-in in another tab writing the same values is the
+  // expected loser here, and the display address is not worth a failed
+  // sign-in.
+  await putItem(
+    {
+      ...profile,
+      email,
+      gsi1sk: sortable(email),
+      identityProvider: provider,
+      version: (profile.version ?? 0) + 1,
+    },
+    { ifFieldEquals: { version: profile.version ?? 0 } },
+  ).catch(() => undefined);
 }

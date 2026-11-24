@@ -15,7 +15,7 @@
  * works on desktop.
  *
  * The redirect URI is matched whole by Cognito, so `slwiki-auth` here and
- * `OBSIDIAN_CALLBACK_URL` in `aws-blocks/index.cdk.ts` have to stay identical.
+ * `OBSIDIAN_CALLBACK_URL` in `cdk-blocks/index.cdk.ts` have to stay identical.
  *
  * ─── What is discovered and what is configured ──────────────────────────────
  * The endpoints are read from the Wiki's own RFC 8414 document, so the Cognito

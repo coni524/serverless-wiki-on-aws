@@ -51,7 +51,7 @@ export function safeUrl(url: string): string | null {
  * A body cannot hold the URL itself. A presigned URL expires within the minute,
  * and an unsigned one would mean a publicly readable object, which the private
  * bucket rules out. So the body holds the id, and the reader signs it at render
- * time — see `createAttachmentDownloadUrls` in `aws-blocks/index.ts`.
+ * time — see `createAttachmentDownloadUrls` in `cdk-blocks/index.ts`.
  */
 const ATTACHMENT_SCHEME = 'attachment:';
 
@@ -61,7 +61,7 @@ const ATTACHMENT_ID = /^[A-Za-z0-9_-]+$/;
 /**
  * How many distinct images one body asks to have signed.
  *
- * Matches `MAX_SIGNED_ATTACHMENTS` in `aws-blocks/attachments.ts`, which refuses
+ * Matches `MAX_SIGNED_ATTACHMENTS` in `cdk-blocks/attachments.ts`, which refuses
  * a longer list. Capping here rather than letting the request be refused keeps a
  * body with an absurd number of images renderable: the ones past the cap fall
  * back to their alt text instead of taking the whole page down.

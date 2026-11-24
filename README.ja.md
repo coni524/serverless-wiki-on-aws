@@ -23,7 +23,7 @@ AWSで動く Markdown の Wiki です。
 - 常時稼働で常時課金されるリソースはありません
 - ローカルの Obsidian と双方向に同期します
 - Bedrock の AI アシスタントと MCP サーバーは、画面と同じ権限判定を通ります
-- AWS Blocks で構築しています
+- AWS CDK Blocks で構築しています
 
 ## 機能
 
@@ -37,7 +37,7 @@ AWSで動く Markdown の Wiki です。
 - Obsidian の保管庫とスペースを双方向に同期するプラグインを同梱しています
 - 添付ファイルは presigned URL（署名付き URL、短時間だけ有効なリンク）で配信します。バケットはパブリックアクセスを全面ブロックします
 - 画面はヘッダーで日本語と英語を切り替えられます
-- インフラは [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks)（Infrastructure-from-Code のフレームワーク）で定義します
+- インフラは [AWS CDK Blocks](https://www.npmjs.com/package/aws-cdk-blocks)（Infrastructure-from-Code のフレームワーク）で定義します
 
 ## 構成図
 
@@ -76,7 +76,7 @@ AWSで動く Markdown の Wiki です。
 ## すぐ試す
 
 AWS アカウントは要りません。
-すべての Building Block が手元でモックとして動き、モックのデータは `.bb-data/` に置かれます。
+すべての Building Block が手元でモックとして動き、モックのデータは `.cdk-blocks/local/data/` に置かれます。
 
 ```bash
 pnpm install
@@ -85,10 +85,21 @@ pnpm run dev
 
 **ブラウザで開く：**[http://localhost:3000](http://localhost:3000)
 
-モックはサインアップを受け付けるので、その画面でアカウントを作ってサインインします。
+手元でも、デプロイ先と同じくサインアップは閉じています。
+先に自分のアカウントを作ります。
+データの保存先ファイルを開発サーバーが書き換えるため、サーバーを止めてから実行します。
+`--password` を付けなければ、パスワードを生成して表示します。
+最初のサインインで認証アプリの設定を求められます。手元のプールは 6 桁の数字なら何でも通します。
+
+```bash
+# 開発サーバーを Ctrl-C で止めてから
+pnpm run local:add-user -- --email you@example.test
+pnpm run dev
+```
+
 権限の判定は本番と同じに動くため、作ったばかりのアカウントはどのグループにも属さず、スペースが 1 つも見えません。
-デプロイ後と同じ手順で自分を管理者にします。
-データの保存先ファイルを開発サーバーが書き換えるため、先にサーバーを止めます。
+一度サインインしたあと、デプロイ後と同じ手順で自分を管理者にします。
+こちらも先にサーバーを止めます。
 
 ```bash
 # 開発サーバーを Ctrl-C で止めてから
@@ -250,7 +261,7 @@ aws cloudformation describe-stacks --stack-name <スタック名> --profile <プ
 
 ```
 serverless-wiki-on-aws/
-├── aws-blocks/           # バックエンド
+├── cdk-blocks/           # バックエンド
 │   ├── index.cdk.ts      # CDK アプリ（Building Block の宣言は resources.ts）
 │   ├── index.ts          # フロントエンドが呼ぶ API
 │   ├── access.ts         # 権限判定
@@ -280,7 +291,7 @@ serverless-wiki-on-aws/
 
 ## 参考
 
-- [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks)：このプロジェクトの実装基盤
+- [AWS CDK Blocks](https://github.com/aws/cdk-blocks)：このプロジェクトの実装基盤
 - [Amazon S3 Vectors のハイブリッド検索](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-hybrid-search.html)：検索の基盤
 - [Model Context Protocol](https://modelcontextprotocol.io/)：`/mcp` エンドポイントのプロトコル
 - [Cloudscape Design System](https://cloudscape.design/)：画面に使っている UI 部品のデザインシステム

@@ -29,12 +29,13 @@
  */
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { isServerRunning } from '@aws-blocks/blocks/utils';
+import { isServerRunning } from 'aws-cdk-blocks/utils';
+
+import { localKey, openLocalTable } from './local-table.js';
 
 import {
   ALL_ROLE_GROUPS,
@@ -70,12 +71,6 @@ export async function devServerIsUp(): Promise<boolean> {
     return true;
   }
 }
-
-/** The mock's data file, keyed by the scope and table id in `resources.ts`. */
-const LOCAL_DATA_FILE = join(process.cwd(), '.bb-data', 'sl-wiki-permissions', 'data.json');
-
-/** The mock serialises a primary key as `JSON.stringify([pk, sk])`. */
-const localKey = (pk: string, sk: string) => JSON.stringify([pk, sk]);
 
 /**
  * The four records that make one account a global administrator.
@@ -166,15 +161,9 @@ type Store = {
 // ─── Local mock ──────────────────────────────────────────────────────────────
 
 function localStore(): Store {
-  if (!existsSync(LOCAL_DATA_FILE)) {
-    throw new Error(
-      `${LOCAL_DATA_FILE} does not exist.\n` +
-        'Run `pnpm run dev`, sign up, sign in once, then stop the server and re-run this.',
-    );
-  }
-  const entries = JSON.parse(readFileSync(LOCAL_DATA_FILE, 'utf8')) as [string, Item][];
-  const data = new Map(entries);
-  const flush = () => writeFileSync(LOCAL_DATA_FILE, `${JSON.stringify([...data], null, 2)}\n`);
+  const { items: data, flush } = openLocalTable(
+    'Run `pnpm run dev`, sign up, sign in once, then stop the server and re-run this.',
+  );
 
   return {
     async findUserSub(email) {
@@ -347,9 +336,10 @@ async function main(): Promise<void> {
   if (email === undefined || local === (tableName !== undefined)) usage();
 
   if (local) {
-    // The mock reads this file once at start-up and rewrites it whole on every
+    // The mock reads its file once at start-up and rewrites it whole on every
     // write, so a change made underneath a running server is dropped by its next
-    // write. Refusing here beats a seeding that silently disappears.
+    // write (`local-table.ts`). Refusing here beats a seeding that silently
+    // disappears.
     if (await devServerIsUp()) {
       console.error('The dev server is running. Stop it, re-run this, then start it again.');
       process.exit(1);

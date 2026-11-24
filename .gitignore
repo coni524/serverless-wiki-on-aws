@@ -1,16 +1,27 @@
 dist
 node_modules
 build-temp
-.blocks-sandbox
+# Per-deploy state AWS CDK Blocks writes (the sandbox id, outputs, dev-server
+# pidfiles). The second line is the name before AWS CDK Blocks 1.0, which an
+# upgraded checkout still has.
+.cdk-blocks-sandbox/
+.blocks-sandbox/
 cdk.out/
 # The frontend build `pnpm run deploy` stages before sending it to S3.
 .hosting/
-aws-blocks/client.js
-aws-blocks/blocks.spec.json
+cdk-blocks/client.js
+cdk-blocks/blocks.spec.json
+# Local mock data from before AWS CDK Blocks 1.0. The current location,
+# .cdk-blocks/local/, is covered by the .cdk-blocks/ rule below.
 .bb-data/
 # Where CDK accumulates the answers to its environment lookups.
 cdk.context.json
-# Where AWS Blocks writes the identifier of the stack it deploys to.
+# Where AWS CDK Blocks keeps the identifier of the stack it deploys to
+# (config.json), the record of every deploy (deploy-history.jsonl, which names
+# stacks and regions) and the local mock data (local/). All of it is per
+# checkout and none of it is published. .blocks/config.json is the name before
+# AWS CDK Blocks 1.0.
+.cdk-blocks/
 .blocks/config.json
 
 # The Obsidian plugin build. Obsidian reads main.js directly under the plugin

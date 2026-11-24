@@ -29,7 +29,7 @@
  * substring match over the pages — a stand-in so the screens work offline,
  * not a model of the hybrid ranking. Try search for real on a sandbox.
  */
-import { AsyncJob } from '@aws-blocks/blocks';
+import { AsyncJob } from 'aws-cdk-blocks';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import {
   DeleteVectorsCommand,
@@ -41,7 +41,7 @@ import { z } from 'zod';
 
 import { ALL_SPACES, PAGE_SK_PREFIX, idOf, kindOf, pageSk, spacePk } from './model.js';
 import { readBody } from './pages.js';
-import { scope, table } from './resources.js';
+import { scope, table, valuesOf } from './resources.js';
 
 /** The index, injected by `index.cdk.ts`. Unset means the local dev server. */
 const INDEX_ARN = process.env.SEARCH_INDEX_ARN ?? '';
@@ -320,7 +320,7 @@ async function searchLocally(
     spaceId !== undefined
       ? [spaceId]
       : (
-          await Array.fromAsync(table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_SPACES } } }))
+          await valuesOf(table.query({ index: 'gsi1', where: { gsi1pk: { equals: ALL_SPACES } } }))
         ).map((item) => idOf(item.pk));
   const needle = query.normalize('NFKC').toLowerCase();
   const hits: IndexHit[] = [];
@@ -328,7 +328,7 @@ async function searchLocally(
     const items = table.query({
       where: { pk: { equals: spacePk(id) }, sk: { beginsWith: PAGE_SK_PREFIX } },
     });
-    for await (const item of items) {
+    for await (const { value: item } of items) {
       if (item.type !== 'PAGE' || kindOf(item) !== 'page') continue;
       const body = await readBody(item.bodyKey);
       const haystack = `${item.title ?? ''}\n${body}`.normalize('NFKC').toLowerCase();

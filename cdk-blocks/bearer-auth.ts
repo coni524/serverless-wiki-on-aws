@@ -23,7 +23,8 @@
  * A token carrying `slwiki/write` still gets a refusal on a space the user
  * cannot write. Neither gate substitutes for the other.
  */
-import { ApiError, type BlocksContext } from '@aws-blocks/core';
+import { ApiError, type BlocksContext } from '@aws-cdk-blocks/core';
+import { getRequestBaseUrl } from '@aws-cdk-blocks/core/bb-utils';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 
 import { type Access, accessForUser, requireAccess } from './access.js';
@@ -44,19 +45,20 @@ export const AUTH_DOMAIN = (process.env.MCP_AUTH_DOMAIN ?? '').replace(/\/+$/, '
 export const OAUTH_CONFIGURED = USER_POOL_ID !== '' && CLIENT_ID !== '' && AUTH_DOMAIN !== '';
 
 /**
- * The URL this Wiki is reached at from outside, when the request cannot say.
+ * The URL this Wiki is reached at from outside, stated rather than inferred.
  *
- * Behind CloudFront it cannot. `Hosting` fronts the API with an origin request
- * policy that forwards every viewer header *except* `Host`, so what arrives at
- * the Lambda is the API Gateway's own domain and stage — not the address the
- * client typed. Metadata built from that names an endpoint the client never
- * connected to, and RFC 9728 has the client check exactly that, so discovery
- * fails. The distribution's domain cannot be injected from CDK either: the
- * distribution points at the API, which points at this Lambda, so feeding it
- * back into the Lambda's environment is a CloudFormation cycle.
+ * Metadata that names an endpoint the client never connected to fails
+ * discovery, because RFC 9728 has the client check exactly that. Behind the
+ * CloudFront door `Hosting` creates, the framework reports the address the
+ * client called in the request URL, so the request alone gets that case right.
+ * It cannot know an address it was never told about — a domain put in front of
+ * the distribution by something other than `Hosting` — and the distribution's
+ * domain cannot be injected from CDK either: the distribution points at the
+ * API, which points at this Lambda, so feeding it back into the Lambda's
+ * environment is a CloudFormation cycle.
  *
- * So it is the operator's to supply, on any deployment where something sits in
- * front of the API — a CDN, a custom domain, both:
+ * So the operator can state it, and `pnpm run deploy` states the distribution's
+ * own address on every deploy (`scripts/deploy.ts`):
  *
  *   MCP_PUBLIC_ORIGIN=https://wiki.example.com pnpm run deploy
  *
@@ -114,16 +116,22 @@ export class Refusal extends Error {
  * The externally visible URL this deployment is reached at, with `suffix`
  * stripped off the end.
  *
- * `MCP_PUBLIC_ORIGIN` wins when it is set, because on the deployment shape that
- * needs it the request is not able to say (see the constant). Otherwise the
- * request is the answer: the framework has already folded the API Gateway stage
- * prefix and `x-forwarded-proto` back into `request.url`, so what is left is to
- * remove the route's own path.
+ * `MCP_PUBLIC_ORIGIN` wins when it is set (see the constant). Otherwise the
+ * request is the answer, in one of two shapes. The request URL's path is the
+ * route path, with no API Gateway stage in it, so for a client that calls the
+ * gateway directly the base comes from `getRequestBaseUrl()`, which is the
+ * gateway's origin plus its stage. Behind the CloudFront door the request URL
+ * is the address the client called — another host than the gateway's, and no
+ * stage in the path — so that origin is the base. What is left in both cases
+ * is to put back whatever sits in front of the route's own path.
  */
 export function baseUrl(context: BlocksContext, suffix: string): string {
   if (PUBLIC_ORIGIN !== '') return PUBLIC_ORIGIN;
   const { origin, pathname } = context.request.url;
-  return pathname.endsWith(suffix) ? origin + pathname.slice(0, -suffix.length) : origin;
+  const prefix = pathname.endsWith(suffix) ? pathname.slice(0, -suffix.length) : '';
+  const gateway = getRequestBaseUrl(context);
+  const root = new URL(gateway).origin === origin ? gateway : origin;
+  return root + prefix;
 }
 
 export function unauthorized(metadataUrl: string, description: string): Refusal {

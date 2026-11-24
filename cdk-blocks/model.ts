@@ -1,11 +1,11 @@
 /**
  * Stored model — schema, keys, and pure helpers.
  *
- * Every entity lives in one DistributedTable under a shared envelope:
+ * Every entity lives in one `KVStore` table under a shared envelope:
  * `pk` / `sk` for the primary key, `gsi1pk` / `gsi1sk` for the single reverse
- * index. A DistributedTable takes exactly one `schema`, and `TableKeyConfig`
- * constrains key fields to `keyof T`, so a discriminated union cannot be used
- * here — the envelope plus a `superRefine` per `type` is the workable shape.
+ * index. A store takes exactly one `schema`, and its `key` and `indexes` name
+ * fields of that schema, so a discriminated union cannot be used here — the
+ * envelope plus a `superRefine` per `type` is the workable shape.
  *
  * No file in this module touches the network; it is safe to import anywhere.
  */
@@ -61,7 +61,7 @@ export const itemSchema = z
     gsi1pk: z.string().optional(),
     gsi1sk: z.string().optional(),
 
-    /** Optimistic-lock counter. DistributedTable has no partial update, so every
+    /** Optimistic-lock counter. The store has no partial update, so every
      *  mutable entity is rewritten whole under `ifFieldEquals: { version }`. */
     version: z.number().int().nonnegative().optional(),
 
@@ -325,7 +325,7 @@ export function after(last: string | undefined, millis: number): string {
  *
  * `lower` empty means "before every sibling". Reordering therefore rewrites the
  * one page that moved, never its siblings — which matters because
- * DistributedTable has no multi-item transaction, so a rewrite of the whole
+ * the store has no multi-item transaction, so a rewrite of the whole
  * sibling list could not be atomic.
  *
  * Returns `null` when the arguments are not strictly ordered, which happens

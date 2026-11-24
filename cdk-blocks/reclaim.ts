@@ -15,7 +15,7 @@
  * The record is written before anything is deleted, so a run that dies part-way
  * still leaves the promise behind for a later retry.
  */
-import { AsyncJob } from '@aws-blocks/blocks';
+import { AsyncJob } from 'aws-cdk-blocks';
 import { z } from 'zod';
 
 import { content, scope, table } from './resources.js';

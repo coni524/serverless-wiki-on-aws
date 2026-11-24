@@ -1,4 +1,4 @@
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 
 // Derived straight from the typed API client so the frontend never restates a
 // backend shape. If a method's return type changes, these follow.

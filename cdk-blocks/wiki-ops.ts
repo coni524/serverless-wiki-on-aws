@@ -14,7 +14,7 @@
  * function below re-checks the space it is about to touch, so no caller can skip
  * the check by holding an `Access`.
  */
-import { table } from './resources.js';
+import { keyOf, putItem, table, valuesOf } from './resources.js';
 import {
   MAX_DEPTH,
   META,
@@ -317,7 +317,7 @@ export async function listPages(access: Access, spaceId: string, cursor?: string
   requireSpace(access, spaceId, 'read');
   const pageSize = 100;
   const from = givenCursor(cursor);
-  const items = await Array.fromAsync(
+  const items = await valuesOf(
     table.query({
       where: {
         pk: { equals: spacePk(spaceId) },
@@ -575,14 +575,14 @@ export async function createPage(
   const key = await writeBody(input.spaceId, pageId, 1, body);
   const position = await positionFor(input.spaceId, parentPageId, undefined);
 
-  await table.put({
+  await putItem({
     pk: pageRefPk(pageId),
     sk: PAGE_REF_SK,
     type: 'PAGE_REF',
     spaceId: input.spaceId,
     createdAt: stamp,
   });
-  await table.put({
+  await putItem({
     pk: spacePk(input.spaceId),
     sk: pageSk(pageId),
     type: 'PAGE',
@@ -643,7 +643,7 @@ export async function updatePage(
   // was written under.
   const updatedAt = now();
 
-  await table.put({
+  await putItem({
     pk: page.pk,
     sk: page.sk,
     type: 'PAGE',
@@ -704,7 +704,7 @@ export async function movePage(
   }
 
   const position = await positionFor(spaceId, newParentId, target.afterPageId, pageId);
-  await table.put({
+  await putItem({
     pk: page.pk,
     sk: page.sk,
     type: 'PAGE',
@@ -763,14 +763,14 @@ export async function createFolder(
   const stamp = now();
   const position = await positionFor(input.spaceId, parentPageId, undefined);
 
-  await table.put({
+  await putItem({
     pk: pageRefPk(folderId),
     sk: PAGE_REF_SK,
     type: 'PAGE_REF',
     spaceId: input.spaceId,
     createdAt: stamp,
   });
-  await table.put({
+  await putItem({
     pk: spacePk(input.spaceId),
     sk: pageSk(folderId),
     type: 'PAGE',
@@ -796,7 +796,7 @@ export async function renameFolder(access: Access, folderId: string, title: stri
   requireKind(folder, 'folder');
   const name = cleanTitle(title);
 
-  await table.put({
+  await putItem({
     pk: folder.pk,
     sk: folder.sk,
     type: 'PAGE',
@@ -922,7 +922,7 @@ async function deleteNode(
         updatedAt: now(),
         createdBy: child.createdBy,
         updatedBy: access.user.userSub,
-      })),
+      })).map((value) => ({ key: keyOf(value), value })),
     );
   }
 

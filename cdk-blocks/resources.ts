@@ -5,16 +5,10 @@
  * auth block without importing the API namespace back (which would be a cycle).
  *
  * API reference for the installed versions:
- *   node_modules/@aws-blocks/bb-auth-cognito/README.md
- *   node_modules/@aws-blocks/bb-distributed-table/README.md
+ *   node_modules/@aws-cdk-blocks/bb-auth/README.md
+ *   node_modules/@aws-cdk-blocks/bb-kv-store/README.md
  */
-import {
-  Scope,
-  AuthCognito,
-  DistributedTable,
-  FileBucket,
-  getDeploymentType,
-} from '@aws-blocks/blocks';
+import { Scope, Auth, KVStore, FileBucket, getDeploymentType } from 'aws-cdk-blocks';
 
 import { itemSchema } from './model.js';
 
@@ -28,13 +22,13 @@ export const scope = new Scope('sl-wiki');
 // Cognito groups are deliberately not configured: authorization lives in
 // DynamoDB, not in the user pool. `requireRole` must not be used.
 //
-// `selfSignUp: false` closes public registration. A deployed pool rejects the
-// SignUp API outright; accounts are created by an administrator, and will come
-// from the corporate IdP once OIDC/SAML federation lands.
-//
-// Note the mock's behaviour differs: locally this flag only removes the
-// "Create Account" action from the sign-in UI, and a direct `signUp` call still
-// succeeds. That is what lets the e2e suite provision its own throwaway user.
+// `selfSignUp` is off, unconditionally, which closes public registration: the
+// pool rejects the SignUp API outright, and accounts are created by an
+// administrator or arrive through a corporate IdP. It is not switched by
+// environment, not even for the local dev server: a setting that differs by
+// environment is one condition away from opening a deployed pool. The local
+// pool refuses sign-up as Cognito does, so local accounts, the e2e suite's
+// included, are created beforehand with `scripts/local-users.ts`.
 //
 // `signInWith: 'email'` makes the email address the Cognito username. Changing
 // this on a deployed pool is destructive, so it is fixed before the first deploy.
@@ -54,29 +48,46 @@ export const scope = new Scope('sl-wiki');
 // token, and a refresh is not a sign-in, so Cognito never puts a factor in
 // front of one. Turning this on over a pool that is already in use therefore
 // takes one more step from the operator — delete every record in the auth
-// session table, which sends each user back through a real sign-in.
-// `userAttributes` adds `custom:groups` to the pool. The identity provider
+// block's session store table, which sends each user back through a real
+// sign-in.
+// `users.attributes` adds `custom:groups` to the pool. The identity provider
 // registration in `index.cdk.ts` copies a federated sign-in's group claim into
 // it, and the sign-in hook in `federation.ts` reads it back out of the ID
 // token — no password account ever carries a value. String and mutable (the
 // defaults; Cognito's default length cap of 2048 applies), and declared
 // unconditionally because a custom attribute, once on a pool, can never be
 // removed — making it conditional would only make deploys diverge.
-export const auth = new AuthCognito(scope, 'auth', {
-  signInWith: 'email',
-  selfSignUp: false,
-  userAttributes: [{ name: 'groups' }],
-  mfa: 'required',
-  mfaTypes: ['TOTP'],
-  passwordPolicy: {
-    minLength: 12,
-    requireUppercase: true,
-    requireLowercase: true,
-    requireDigits: true,
-    requireSymbols: true,
+//
+// `userWritable: false` keeps it out of the write attributes of the block's app
+// client and makes the block refuse an end-user write of it, so the value can
+// only come from the identity provider registration. It is what role groups are
+// derived from, so a user able to set it would be able to pick their own
+// permissions at the next federated sign-in.
+export const auth = new Auth(scope, 'auth', {
+  users: {
+    signInWith: ['email'],
+    attributes: [{ name: 'groups', userWritable: false }],
   },
-  sessionTtlSeconds: 60 * 60 * 24 * 30, // 30 days — shorter than the 400-day default
-  crossDomain: getDeploymentType() === 'sandbox',
+  emailPassword: {
+    selfSignUp: false,
+    passwordPolicy: {
+      minLength: 12,
+      requireUppercase: true,
+      requireLowercase: true,
+      requireDigits: true,
+      requireSymbols: true,
+    },
+  },
+  mfa: { mode: 'required', types: ['TOTP'] },
+  session: {
+    ttlSeconds: 60 * 60 * 24 * 30, // 30 days
+    crossDomain: getDeploymentType() === 'sandbox',
+  },
+  // The pool holds every account, and the permission records point at its
+  // `sub`s, so a deployed stack keeps it when the stack is deleted or the
+  // block is replaced. Stated explicitly rather than left to the stack preset,
+  // so the intent does not depend on which preset the stack was created with.
+  removalPolicy: getDeploymentType() === 'sandbox' ? 'destroy' : 'retain',
 });
 
 // ─── Permission table ────────────────────────────────────────────────────────
@@ -84,15 +95,50 @@ export const auth = new AuthCognito(scope, 'auth', {
 // `scan()` call against it: every access pattern this project has is reachable
 // from the primary key or `gsi1`.
 //
-// Generics are all left to inference on purpose — passing one explicit type
-// argument breaks key-type inference (see the block's README).
-export const table = new DistributedTable(scope, 'permissions', {
+// A `schema` with a declared `key` is the store's record form: the key fields
+// are the table's key schema, so the table, its key and its items are the ones
+// the store has always had. Generics are left to inference — the schema sets
+// the value type, and a type argument beside it is not allowed.
+export const table = new KVStore(scope, 'permissions', {
   schema: itemSchema,
   key: { partitionKey: 'pk', sortKey: 'sk' },
   indexes: {
     gsi1: { partitionKey: 'gsi1pk', sortKey: 'gsi1sk' },
   },
 });
+
+/** The primary key of a stored item: the two fields the table is keyed on. */
+export function keyOf(item: { pk: string; sk: string }): { pk: string; sk: string } {
+  return { pk: item.pk, sk: item.sk };
+}
+
+/**
+ * Write one item under its own key.
+ *
+ * The store takes the key and the value apart (`put(key, value)`), and refuses
+ * a value whose key fields disagree with the key. Every item here carries its
+ * key in its own `pk` / `sk`, so the key is always read off the value and the
+ * two cannot disagree.
+ */
+export function putItem(
+  item: Parameters<typeof table.put>[1] & { pk: string; sk: string },
+  options?: Parameters<typeof table.put>[2],
+): Promise<void> {
+  return table.put(keyOf(item), item, options);
+}
+
+/**
+ * The values of a query, in the order it returns them.
+ *
+ * A query yields `{ key, value }` entries and reads every page of its
+ * partition unless given a `limit`; the callers here only ever want the stored
+ * items, so this unwraps them.
+ */
+export async function valuesOf<T>(results: AsyncIterable<{ value: T }>): Promise<T[]> {
+  const values: T[] = [];
+  for await (const { value } of results) values.push(value);
+  return values;
+}
 
 // ─── Content bucket ──────────────────────────────────────────────────────────
 // One bucket for page bodies and attachments alike. Splitting them
@@ -138,5 +184,5 @@ export const content = new FileBucket(scope, 'content', {
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 // There is none in the application. The first global administrator is four
 // records the operator writes straight into the table with
-// `aws-blocks/scripts/seed-admin.ts`, so no API can raise anyone's own
+// `cdk-blocks/scripts/seed-admin.ts`, so no API can raise anyone's own
 // permissions.

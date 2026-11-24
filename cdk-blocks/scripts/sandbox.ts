@@ -1,4 +1,4 @@
-import { startSandbox, getStackName } from '@aws-blocks/blocks/scripts';
+import { startSandbox, getStackName } from 'aws-cdk-blocks/scripts';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 

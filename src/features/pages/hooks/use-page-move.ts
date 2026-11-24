@@ -18,7 +18,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
-import { api } from 'aws-blocks';
+import { api } from 'cdk-blocks';
 import { errMessage } from '@/utils/errors';
 import { noteMovedNode } from '@/features/pages/api/page-cache';
 import type { Page } from '@/types/api';

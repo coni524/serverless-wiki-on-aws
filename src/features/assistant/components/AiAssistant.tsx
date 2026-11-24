@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { api } from 'aws-blocks';
-import { useChat, type ChatMessage } from '@aws-blocks/bb-agent/client';
+import { api } from 'cdk-blocks';
+import { useChat, type ChatMessage } from '@aws-cdk-blocks/bb-agent/client';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -13,7 +13,7 @@ import { useLocale, useT, type Messages } from '@/lib/i18n';
 import { Markdown } from '@/components/Markdown';
 // The one rule that decides what a discarded change leaves behind, reached from
 // the browser so the live panel and a reloaded one agree. See the module.
-import { withoutDiscardedReplies } from '../../../../aws-blocks/transcript';
+import { withoutDiscardedReplies } from '../../../../cdk-blocks/transcript';
 
 /**
  * The AI assistant panel, rendered as the app layout's right-hand drawer.
@@ -233,7 +233,7 @@ export function useAssistant({
    * report, and `withoutDiscardedReplies` hides the closing message the model
    * writes about the tool it was not allowed to run. The turn is still resumed,
    * because that is the only thing that clears the pending approval — see
-   * `aws-blocks/transcript.ts`.
+   * `cdk-blocks/transcript.ts`.
    */
   const respond = async (approved: boolean) => {
     const pending = interrupts;
