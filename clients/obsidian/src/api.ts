@@ -16,7 +16,7 @@ import { requestUrl } from 'obsidian';
 import { AuthClient, type Credential } from './auth';
 import { t } from './i18n';
 import type { RemoteNode } from './paths';
-import { type SettingsHost, normalizeUrl } from './settings';
+import { type SettingsHost, isSecureWikiUrl, normalizeUrl } from './settings';
 
 /** The fourteen methods of `cdk-blocks/ext-methods.ts`. */
 export type ExtMethod =
@@ -76,8 +76,11 @@ export class SyncApi {
       throw new SyncApiError(0, t.wikiUrlMissing);
     }
 
-    const send = async (credential: Credential) =>
-      await requestUrl({
+    const send = async (credential: Credential) => {
+      // Checked on the address the token travels to, not only on the settings:
+      // tokens stored before this check existed may name a plain-http Wiki.
+      if (!isSecureWikiUrl(credential.wikiUrl)) throw new SyncApiError(0, t.wikiUrlInsecure);
+      return await requestUrl({
         url: `${credential.wikiUrl}/ext/${method}`,
         method: 'POST',
         headers: {
@@ -87,6 +90,7 @@ export class SyncApi {
         body: JSON.stringify(args),
         throw: false,
       });
+    };
 
     const first = await this.auth.credential();
     let response = await send(first);

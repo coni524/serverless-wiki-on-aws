@@ -20,9 +20,17 @@
  * node_modules/@aws-cdk-blocks/
  * ─────────────────────────────────────────────────────────────────────────────
  */
+import { ApiError, type BlocksContext } from '@aws-cdk-blocks/core';
 import { ApiNamespace } from 'aws-cdk-blocks';
 
 import { auth, putItem, scope, table, valuesOf } from './resources.js';
+import {
+  PASSKEYS_ENABLED,
+  completePasskeyRegistration,
+  deletePasskey,
+  listPasskeys,
+  startPasskeyRegistration,
+} from './passkeys.js';
 import {
   ALL_ROLE_GROUPS,
   ALL_SPACES,
@@ -106,7 +114,62 @@ import {
   swallowConditionalFailure,
 } from './access.js';
 
-export const authApi = auth.createApi();
+/**
+ * The account actions the sign-in API would otherwise take from any session.
+ *
+ * The auth block's sign-in API also manages a signed-in account: it adds,
+ * lists and removes passkeys and sets up or switches off an authenticator app,
+ * and for most of that a session is all it asks for. A session left open on a
+ * shared machine, or taken, would then be enough to add the taker's passkey,
+ * remove the owner's and swap the owner's authenticator for the taker's: a way
+ * back in that needs no password, with the owner locked out of their own
+ * account.
+ *
+ * None of these is something this Wiki's sign-in form sends. Passkeys are
+ * managed through `api` (`passkeys.ts`), which asks for a recent sign-in, and
+ * an authenticator is enrolled only during sign-in, as the challenge the pool
+ * sets — that arrives as `confirmSignIn`, which passes through.
+ */
+const ACCOUNT_ACTIONS: ReadonlySet<string> = new Set([
+  'startPasskeyRegistration',
+  'completePasskeyRegistration',
+  'listPasskeys',
+  'deletePasskey',
+  'setUpTotp',
+  'verifyTotpSetup',
+  'getMfaPreference',
+  'updateMfaPreference',
+]);
+
+const blockAuthApi = auth.createApi();
+
+/** The two methods of the block's namespace, as the wrapper below calls them. */
+type SignInMethods = {
+  getAuthState: () => Promise<unknown>;
+  setAuthState: (input: { action?: unknown }) => Promise<unknown>;
+};
+
+/**
+ * The block's sign-in API with the account actions above refused.
+ *
+ * Everything else, signing in and out included, is handed to the block
+ * unchanged. The type is the block's own, so the sign-in form and the
+ * generated client see the same API they always did.
+ */
+export const authApi = new ApiNamespace(auth, 'auth', (context: BlocksContext) => {
+  const block = (blockAuthApi as unknown as (context: BlocksContext) => SignInMethods)(context);
+  return {
+    getAuthState: async () => await block.getAuthState(),
+    setAuthState: async (input: { action?: unknown }) => {
+      if (typeof input?.action === 'string' && ACCOUNT_ACTIONS.has(input.action)) {
+        throw new ApiError('This action is not offered by the sign-in API', 403, {
+          name: 'ActionNotOfferedException',
+        });
+      }
+      return await block.setAuthState(input);
+    },
+  };
+}) as unknown as typeof blockAuthApi;
 
 const now = () => new Date().toISOString();
 const newId = () => crypto.randomUUID();
@@ -357,7 +420,37 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
    * redeploying the frontend.
    */
   async authProviders() {
-    return { providers: federationProviders.map(({ name, label }) => ({ name, label })) };
+    return {
+      providers: federationProviders.map(({ name, label }) => ({ name, label })),
+      // Whether the password form offers passkey sign-in. Like the providers,
+      // a fact about the deployment, not about anyone's account.
+      passkeys: PASSKEYS_ENABLED,
+    };
+  },
+
+  // ─── Passkeys (password accounts) ──────────────────────────────────────────
+  // The work, and the reasons, are in `passkeys.ts`. Each method authenticates
+  // against the password block; the three that change anything need a recent
+  // sign-in.
+
+  /** The signed-in password account's passkeys. */
+  async listPasskeys() {
+    return await listPasskeys(context);
+  },
+
+  /** Begin adding a passkey: the options `navigator.credentials.create` takes, as JSON. */
+  async startPasskeyRegistration() {
+    return await startPasskeyRegistration(context);
+  },
+
+  /** Finish adding a passkey from the browser's JSON-encoded credential. */
+  async completePasskeyRegistration(credential: string) {
+    return await completePasskeyRegistration(context, credential);
+  },
+
+  /** Remove one of the signed-in account's passkeys. */
+  async deletePasskey(credentialId: string) {
+    return await deletePasskey(context, credentialId);
   },
 
   /**
@@ -1346,7 +1439,16 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     const access = await requireAccess(context);
     requireGlobalAdmin(access);
     await requireItem(userGroupPk(userGroupId), META, 'User group');
-    await requireItem(roleGroupPk(roleGroupId), META, 'Role group');
+    const roleGroup = await requireItem(roleGroupPk(roleGroupId), META, 'Role group');
+    // The rule `setDefaults` enforces, held from the other side: every account
+    // signing in for the first time joins the default group, so global
+    // administrator attached to it would hand that to each of them.
+    if (roleGroup.global === true) {
+      const defaults = await table.get({ pk: CONFIG_PK, sk: CONFIG_DEFAULTS });
+      if (defaults?.defaultUserGroupId === userGroupId) {
+        invalid('Global administrator cannot be attached to the default user group');
+      }
+    }
     await putItem({
       pk: userGroupPk(userGroupId),
       sk: roleGroupPk(roleGroupId),
@@ -1480,7 +1582,3 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return { defaultUserGroupId, version: version + 1 };
   },
 }));
-
-// Re-exported so pages, search, and the MCP server reuse the same gate rather
-// than rebuilding one.
-export { filterReadable, requireAccess, requireSpace, requireGlobalAdmin } from './access.js';

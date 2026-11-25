@@ -531,6 +531,21 @@ blocksStack.executionRole.addToPrincipalPolicy(
   }),
 );
 
+// A passkey unlocked with the device's fingerprint, face or PIN counts as the
+// second factor, so a pool that requires MFA still lets it in alone. This is
+// not optional: Cognito refuses a pool that requires MFA, offers passkeys as a
+// first factor and counts them as a single factor. The auth block configures
+// the relying party but has no option for this, nor has the CDK `UserPool`; the
+// CloudFormation property is the pool's own setting, set here as is. It needs
+// the Essentials feature plan, which the pool is on.
+//
+// Read off the pool rather than recomputed: the block sets the relying party
+// exactly when `resources.ts` turned passkeys on, so the two cannot disagree.
+const cfnUserPool = userPool.node.defaultChild as cdk.aws_cognito.CfnUserPool;
+if (cfnUserPool.webAuthnRelyingPartyId !== undefined) {
+  cfnUserPool.webAuthnFactorConfiguration = 'MULTI_FACTOR_WITH_USER_VERIFICATION';
+}
+
 // The address clients actually reach, stated rather than inferred (see
 // `PUBLIC_ORIGIN` in `bearer-auth.ts`). Behind the CloudFront door `Hosting`
 // creates, the request already carries the address the client called; what it

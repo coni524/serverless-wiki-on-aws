@@ -18,6 +18,10 @@
  * The override is keyed by field name, and the block ignores names an action did
  * not emit. `sharedSecret` exists on the setup step alone, so nothing here
  * reaches the plain "enter your code" challenge that every later sign-in shows.
+ *
+ * One more step of the same form is redrawn here for the same reason: the
+ * choice of a way in that a passkey sign-in meets when the account has no
+ * passkey (`passwordFallback`).
  */
 import qrcode from 'qrcode-generator';
 import type { Authenticator } from 'aws-cdk-blocks/ui';
@@ -96,10 +100,49 @@ export function authenticatorOptions(): AuthenticatorOptions {
           // Both the setup step and every later sign-in ask for the six digits.
           // The hint tells a password manager to offer the code it holds.
           code: { autocomplete: 'one-time-code' },
+          // Asked only when a passkey sign-in reaches an account with no
+          // passkey; see `passwordFallback`.
+          firstFactor: { render: () => passwordFallback() },
+        },
+      },
+      // The passkey form asks for the same address the password form does; the
+      // block calls the field "Username", which here is the email address.
+      // `webauthn` in the hint is inert unless the page also starts a
+      // conditional passkey request, which the block's form does not; it is
+      // there so that turning that on later needs no change here.
+      signInWithPasskey: {
+        fields: {
+          username: { label: 'Email', placeholder: 'Email', autocomplete: 'username webauthn' },
         },
       },
     },
   };
+}
+
+/**
+ * The step a passkey sign-in reaches when the account has no passkey.
+ *
+ * Cognito answers such a sign-in by asking which way in to use instead, and
+ * the block draws that as a free-text box labelled "Pick one of:" followed by
+ * the choices. The choices arrive empty, so the box names nothing, and a reader
+ * who types the password into it sees it in clear text and gets "Invalid
+ * parameter" back. This pool offers only two ways in, the passkey and the
+ * password, and this step is reached only by an account without the first, so
+ * the answer is always the password: it rides in a hidden input, and the panel
+ * says where the button leads. The block then asks for the password in a
+ * password field, and after it the authenticator code, as on any sign-in.
+ */
+function passwordFallback(): Node {
+  const panel = document.createElement('div');
+  panel.style.cssText = 'margin-bottom: 16px;';
+  panel.appendChild(paragraph(words().noPasskeyFallback));
+
+  const answer = document.createElement('input');
+  answer.type = 'hidden';
+  answer.name = 'firstFactor';
+  answer.value = 'PASSWORD';
+  panel.appendChild(answer);
+  return panel;
 }
 
 /**

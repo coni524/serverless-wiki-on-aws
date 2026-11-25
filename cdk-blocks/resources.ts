@@ -50,6 +50,52 @@ export const scope = new Scope('sl-wiki');
 // takes one more step from the operator — delete every record in the auth
 // block's session store table, which sends each user back through a real
 // sign-in.
+// Passkeys sit on top of that requirement rather than beside it. A passkey
+// unlocked with the device's fingerprint, face or PIN already proves both
+// possession and the person, so the pool is told to count such a sign-in as
+// the second factor (`WebAuthnFactorConfiguration` in `index.cdk.ts`). The
+// password and the authenticator app stay as the way back in when the device
+// is lost.
+//
+// The relying party is the address the Wiki is served from, because the
+// sign-in form lives on the Wiki's own page. `MCP_PUBLIC_ORIGIN` is that
+// address: `pnpm run deploy` fills it in on its second pass, and an operator
+// with a custom domain sets it. Until it is known — the very first pass of a
+// brand-new stack — passkeys stay off rather than binding to a guess, since
+// every passkey made against the wrong address would have to be made again.
+// The sandbox and the local server serve the page from localhost.
+//
+// Only this browser form offers them. The MCP and Obsidian clients sign in on
+// the pool's own hosted page, which lives on the pool's domain; a passkey bound
+// to the Wiki's address does not answer there, so those keep password + TOTP.
+export const passkeyOrigin = resolvePasskeyOrigin();
+
+function resolvePasskeyOrigin(): string | undefined {
+  const deployment = getDeploymentType();
+  if (deployment === 'sandbox' || deployment === 'local') return 'http://localhost:3000';
+  const raw = (process.env.MCP_PUBLIC_ORIGIN ?? '').trim();
+  if (raw === '') return undefined;
+  // Normalised the way a browser reports its origin (lower-case host, no
+  // default port, no path), since a passkey ceremony is checked against that
+  // exact string. A value a browser could not report is refused here, at
+  // synth, rather than deployed as a relying party no passkey would match.
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(
+      `MCP_PUBLIC_ORIGIN must be an origin such as https://wiki.example.com (got "${raw}"). ` +
+        'Passkeys are bound to it.',
+    );
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      `MCP_PUBLIC_ORIGIN must use https (got "${raw}"). Browsers offer passkeys only on secure origins.`,
+    );
+  }
+  return url.origin;
+}
+
 // `users.attributes` adds `custom:groups` to the pool. The identity provider
 // registration in `index.cdk.ts` copies a federated sign-in's group claim into
 // it, and the sign-in hook in `federation.ts` reads it back out of the ID
@@ -67,6 +113,13 @@ export const auth = new Auth(scope, 'auth', {
   users: {
     signInWith: ['email'],
     attributes: [{ name: 'groups', userWritable: false }],
+    // Choice-based sign-in, which passkeys ride on. The password form asks for
+    // the password factor outright, so a password sign-in still goes
+    // password, then the authenticator code, as before, with no step in
+    // between asking which factor to use; the passkey button asks for the
+    // passkey factor itself.
+    authFlow: 'USER_AUTH',
+    preferredChallenge: 'PASSWORD',
   },
   emailPassword: {
     selfSignUp: false,
@@ -79,6 +132,20 @@ export const auth = new Auth(scope, 'auth', {
     },
   },
   mfa: { mode: 'required', types: ['TOTP'] },
+  // Passkeys and choice-based sign-in are not in the 'lite' plan, so the plan
+  // is stated rather than left to the default it happens to equal.
+  featurePlan: 'essentials',
+  ...(passkeyOrigin === undefined
+    ? {}
+    : {
+        passkeys: {
+          relyingPartyId: new URL(passkeyOrigin).hostname,
+          origins: [passkeyOrigin],
+          // Required, not preferred: only a passkey that checked the person
+          // may stand in for the second factor.
+          userVerification: 'required' as const,
+        },
+      }),
   session: {
     ttlSeconds: 60 * 60 * 24 * 30, // 30 days
     crossDomain: getDeploymentType() === 'sandbox',

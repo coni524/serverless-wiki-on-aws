@@ -26,6 +26,7 @@ import { LOCALES, LOCALE_NAMES, useLocale, useT, type Locale } from '@/lib/i18n'
 import { hrefAdmin, hrefHome, hrefNode, navigate, useRoute } from '@/lib/router';
 import { AdminNavigation } from '@/features/admin/components/AdminNavigation';
 import { authenticatorOptions, watchTypedUsername } from '@/features/auth/components/totp-setup';
+import { PasskeysModal } from '@/features/auth/components/PasskeysModal';
 import { ASSISTANT_DRAWER_ID, AiAssistant, useAssistant } from '@/features/assistant/components/AiAssistant';
 import {
   NavigationResizer,
@@ -261,6 +262,16 @@ export function App() {
   // `sub`. The address the user typed comes from `me()`.
   const identity = useMe(signedIn);
 
+  // Passkeys belong to password accounts on a deployment that offers them. A
+  // federated account's sign-in, passkey or not, is its identity provider's.
+  const authProviders = useAuthProviders();
+  const canManagePasskeys =
+    authProviders.data?.passkeys === true &&
+    identity.data !== undefined &&
+    identity.data.identityProvider === null;
+  const [passkeysOpen, setPasskeysOpen] = useState(false);
+  const openPasskeys = useCallback(() => setPasskeysOpen(true), []);
+
   const signOut = useCallback(async () => {
     // Both sessions are ended, not the one this reader appears to hold. Which
     // kind they hold is a server-side fact this shell only learns second-hand,
@@ -312,8 +323,11 @@ export function App() {
         signedIn={signedIn}
         email={identity.data?.email ?? null}
         isGlobalAdmin={identity.data?.isGlobalAdmin === true}
+        canManagePasskeys={canManagePasskeys}
+        onOpenPasskeys={openPasskeys}
         onSignOut={signOut}
       />
+      {passkeysOpen && canManagePasskeys && <PasskeysModal onDismiss={() => setPasskeysOpen(false)} />}
 
       {navigationShown && navigationOpen && (
         <NavigationResizer
@@ -431,11 +445,15 @@ const TopBar = memo(function TopBar({
   signedIn,
   email,
   isGlobalAdmin,
+  canManagePasskeys,
+  onOpenPasskeys,
   onSignOut,
 }: {
   signedIn: boolean;
   email: string | null;
   isGlobalAdmin: boolean;
+  canManagePasskeys: boolean;
+  onOpenPasskeys: () => void;
   onSignOut: () => void;
 }) {
   const t = useT();
@@ -470,10 +488,12 @@ const TopBar = memo(function TopBar({
     // can use is worse than no link.
     items: [
       ...(isGlobalAdmin ? [{ id: 'admin', text: t.app.admin }] : []),
+      ...(canManagePasskeys ? [{ id: 'passkeys', text: t.app.passkeys }] : []),
       { id: 'signOut', text: t.app.signOut },
     ],
     onItemClick: (e) => {
       if (e.detail.id === 'admin') navigate(hrefAdmin('users'));
+      else if (e.detail.id === 'passkeys') onOpenPasskeys();
       else void onSignOut();
     },
   };

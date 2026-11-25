@@ -127,6 +127,28 @@ export function normalizeUrl(value: string): string {
   return value.trim().replace(/\/+$/, '');
 }
 
+/** Hosts a development Wiki is served from, where plain http stays on the machine. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * Whether a Wiki URL may be sent a bearer token.
+ *
+ * Only https, so the token and the pages travel encrypted: over plain http,
+ * anyone on the network path could read the token and use it as the reader
+ * until it expires. Plain http is let through for the loopback hosts alone,
+ * where a development server runs and nothing leaves the machine.
+ */
+export function isSecureWikiUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  return url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname);
+}
+
 /** The two connection settings, tidied the way the issuer records them. */
 export function connectionOf(settings: SlWikiSettings): { wikiUrl: string; clientId: string } {
   return { wikiUrl: normalizeUrl(settings.wikiUrl), clientId: settings.clientId.trim() };

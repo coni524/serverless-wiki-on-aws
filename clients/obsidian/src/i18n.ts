@@ -192,6 +192,7 @@ const ja = {
   noRefreshToken: 'リフレッシュトークンが返りませんでした。',
   signInExpired: 'サインインの有効期限が切れました。もう一度サインインしてください。',
   configMissing: 'Wiki の URL とクライアント ID を先に設定してください。',
+  wikiUrlInsecure: 'Wiki の URL は https:// で始めてください。暗号化されない http では、サインインの鍵が途中で読まれるおそれがあります。',
   discoveryUnreachable: (url: string, detail: string): string =>
     `${url} に接続できませんでした: ${detail}`,
   discoveryStatus: (url: string, status: number): string =>
@@ -404,6 +405,7 @@ const en: Messages = {
   noRefreshToken: 'No refresh token was returned.',
   signInExpired: 'Your sign-in has expired. Please sign in again.',
   configMissing: 'Set the Wiki URL and the client ID first.',
+  wikiUrlInsecure: 'The Wiki URL must start with https://. Over plain http, your sign-in token could be read on the way.',
   discoveryUnreachable: (url, detail) => `Could not reach ${url}: ${detail}`,
   discoveryStatus: (url, status) => `${url} returned ${status}. Check the Wiki URL.`,
   discoveryNotJson: (url) => `The response from ${url} is not JSON. Check the Wiki URL.`,

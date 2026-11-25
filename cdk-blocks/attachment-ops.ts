@@ -126,12 +126,11 @@ function cleanAttachmentId(value: string): string {
  * as the upload's `Content-Type`: it is signed into the URL, so S3 rejects a
  * mismatch, and it is also the type the download will serve back.
  *
- * `size` is the client's declared byte count, checked here against the cap.
- * The signature cannot carry a length condition — the block's `putUrl` takes
- * none — so a client that lies about it can still overrun. That object is
- * bounded, sits under the page prefix, and is reclaimed with the page; a hard
- * server-side cap would need a presigned POST and a direct AWS SDK call, which
- * this design deliberately keeps out.
+ * `size` is the client's declared byte count, checked here against the cap
+ * and signed into the URL as the exact `Content-Length`. S3 then accepts a body
+ * of that size and no other, so a client that declares a small file cannot
+ * send a large one. Browsers and Obsidian set the header from the body, which
+ * is why every caller declares the file's real size.
  */
 export async function createAttachmentUploadUrl(
   access: Access,
@@ -146,7 +145,7 @@ export async function createAttachmentUploadUrl(
   await readPage(spaceId, input.pageId);
 
   const filename = cleanFilename(input.filename);
-  if (!Number.isFinite(input.size) || input.size < 0) invalid('A file size is required');
+  if (!Number.isSafeInteger(input.size) || input.size < 0) invalid('A file size is required');
   if (input.size > MAX_ATTACHMENT_BYTES) {
     invalid(`An attachment may be at most ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MiB`);
   }
@@ -155,7 +154,7 @@ export async function createAttachmentUploadUrl(
   const attachmentId = newId();
   const uploadUrl = await content.putUrl(
     attachmentKey(spaceId, input.pageId, attachmentId, filename),
-    { expiresIn: ATTACHMENT_UPLOAD_URL_TTL, contentType },
+    { expiresIn: ATTACHMENT_UPLOAD_URL_TTL, contentType, contentLength: input.size },
   );
   return { attachmentId, filename, contentType, uploadUrl, expiresIn: ATTACHMENT_UPLOAD_URL_TTL };
 }

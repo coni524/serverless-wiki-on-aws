@@ -54,7 +54,7 @@ S3 Vectors hybrid search: one query, one ranking, highlighted excerpts, and sugg
 <td width="33%" valign="top">
 <img src="assets/readme/icon-sso.svg" width="40" height="40" alt=""><br>
 <b>Sign in your way</b><br>
-Email with TOTP, or any OIDC provider: Microsoft Entra ID, Okta, OneLogin, Auth0, Keycloak.
+Email with a passkey or TOTP, or any OIDC provider: Microsoft Entra ID, Okta, OneLogin, Auth0, Keycloak.
 </td>
 <td width="33%" valign="top">
 <img src="assets/readme/icon-idle.svg" width="40" height="40" alt=""><br>
@@ -100,7 +100,7 @@ pnpm run dev
 Sign-up is closed here too, as on a deployed stack, which is why you create the account first.
 Run `local:add-user` and `seed-admin` with the dev server stopped, because it rewrites the local data files.
 Add `--password` to `local:add-user` to choose the password yourself.
-The first sign-in asks you to set up an authenticator app; the local pool accepts any 6 digits.
+The first sign-in asks you to set up an authenticator app; the local pool accepts any 6 digits. The local pool also asks for the password a second time after the first form; a deployed pool does not.
 Permission checks work as in production, so a new account sees no spaces until `seed-admin` makes it an administrator.
 Only the assistant differs: it talks to a mock model that replies with fixed text.
 
@@ -142,7 +142,11 @@ aws cognito-idp admin-set-user-password \
   --profile <profile> --region <region>
 ```
 
-The pool requires MFA and offers TOTP as the only factor, so the first sign-in in the browser presents an enrolment challenge: scan the QR code with an authenticator app and enter the six-digit code it shows. Every later sign-in asks for a code.
+The pool requires MFA, and TOTP is the only second factor, so the first sign-in in the browser presents an enrolment challenge: scan the QR code with an authenticator app and enter the six-digit code it shows. Every later sign-in asks for a code.
+
+Once signed in, a password account can add a passkey from the account menu (Passkeys). From then on the browser sign-in takes the passkey alone — the device's fingerprint, face or PIN stands in for both the password and the code. The password and the authenticator app stay as the way back in if the device is lost. MCP clients and Obsidian sign in on the user pool's own page, so they keep using the password and a code.
+
+Passkeys are bound to the domain the Wiki is served from: the CloudFront domain by default. On a new stack they switch on with the second pass of `pnpm run deploy`, once that domain is known; an existing stack gets them on its next deploy. **If you plan to put a custom domain in front, do it before anyone adds a passkey** (set `MCP_PUBLIC_ORIGIN` to it). Changing the domain later — a custom domain, or a stack rebuilt with a new CloudFront domain — leaves every existing passkey unusable; users sign in with their password and a code and add a passkey again.
 
 #### The first administrator
 
@@ -233,7 +237,7 @@ The bundled plugin in `clients/obsidian/` syncs an Obsidian vault with the space
 | Variable | Default | Purpose |
 |---|---|---|
 | `CORS_ALLOWED_ORIGINS` | read from the stack output by `pnpm run deploy` | Comma-separated origins the S3 bucket accepts presigned-URL requests from. Without a match, attachments fail in the browser. Set it explicitly when a custom domain sits in front of CloudFront or several origins serve the app. Wildcards are rejected. |
-| `MCP_PUBLIC_ORIGIN` | read from the stack output by `pnpm run deploy` | The origin the MCP OAuth metadata advertises. Set it explicitly for a custom domain. |
+| `MCP_PUBLIC_ORIGIN` | read from the stack output by `pnpm run deploy` | The origin the MCP OAuth metadata advertises, and the domain passkeys are bound to. Set it explicitly for a custom domain, before anyone adds a passkey. |
 | `AI_MODEL_ID` | `global.amazon.nova-2-lite-v1:0` | The Bedrock model the assistant talks to. Amazon Nova 2 Lite through its Global inference profile is the default. `jp.amazon.nova-2-lite-v1:0` keeps inference inside Japan; `global.anthropic.claude-sonnet-4-6` and `global.anthropic.claude-sonnet-5` select tools better and cost more. Whichever you name, enable model access for it in Bedrock first — passing the variable does not grant it. Read at run time, so an unset or empty value falls back to the default rather than failing. |
 
 </details>

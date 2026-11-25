@@ -228,7 +228,7 @@ test('auth: a password alone does not sign the user in', async () => {
   // user has enrolled nothing yet, which makes the challenge the enrolment.
   assert.strictEqual(challenged.state, 'confirmingSignIn');
 
-  const state = await passSecondFactor(challenged);
+  const state = await passSecondFactor(challenged, PASSWORD);
   assert.strictEqual(state.state, 'signedIn');
   // The pool signs in with the email address, so Cognito names the account
   // with a generated id; the address is what the sign-in UI shows.
@@ -236,15 +236,79 @@ test('auth: a password alone does not sign the user in', async () => {
 });
 
 test('auth: a wrong password is rejected', async () => {
-  const state = await authApi.setAuthState({
-    action: 'signIn',
-    username: USERNAME,
-    password: 'WrongPassword123!',
-  });
+  const state = await passSecondFactor(
+    await authApi.setAuthState({
+      action: 'signIn',
+      username: USERNAME,
+      password: 'WrongPassword123!',
+    }),
+    'WrongPassword123!',
+  );
   assert.strictEqual(state.state, 'signedOut');
   assert.ok(state.errorName, 'Expected a structured error name on the signed-out state');
 
   // Restore the session for the remaining tests.
+  await signInAs(USERNAME, PASSWORD);
+});
+
+// ─── Passkeys (password accounts) ─────────────────────────────────────────────
+// The local pool keeps passkeys but does not verify their signatures, so a
+// credential here only has to carry an id. What is under test is the API's
+// own surface: who reaches it, and that each change answers with the list.
+
+test('passkeys: the deployment says it offers them', async () => {
+  assert.strictEqual((await api.authProviders()).passkeys, true);
+});
+
+test('passkeys: a password account adds, lists and removes one', async () => {
+  assert.deepStrictEqual(await api.listPasskeys(), []);
+
+  const options = JSON.parse(await api.startPasskeyRegistration());
+  assert.ok(typeof options.challenge === 'string' && options.challenge !== '', 'Expected creation options with a challenge');
+
+  const added = await api.completePasskeyRegistration(
+    JSON.stringify({ id: 'e2e-passkey-1', rawId: 'e2e-passkey-1', type: 'public-key', response: {} }),
+  );
+  assert.deepStrictEqual(added.map((passkey) => passkey.credentialId), ['e2e-passkey-1']);
+  assert.deepStrictEqual((await api.listPasskeys()).map((passkey) => passkey.credentialId), ['e2e-passkey-1']);
+
+  assert.deepStrictEqual(await api.deletePasskey('e2e-passkey-1'), []);
+});
+
+test('passkeys: a malformed credential or id is refused as invalid input', async () => {
+  await rejects(() => api.completePasskeyRegistration(''), 'credential is required');
+  await rejects(() => api.deletePasskey(''), 'credential id is required');
+});
+
+test('passkeys: the sign-in API refuses account changes, even to a signed-in session', async () => {
+  // These would otherwise let a session that was left open add a passkey,
+  // remove the owner's or swap their authenticator without a recent sign-in.
+  const actions = [
+    { action: 'startPasskeyRegistration' },
+    { action: 'completePasskeyRegistration', credential: { id: 'e2e-passkey-3', response: {} } },
+    { action: 'listPasskeys' },
+    { action: 'deletePasskey', credentialId: 'e2e-passkey-3' },
+    { action: 'setUpTotp' },
+    { action: 'verifyTotpSetup', code: '123456' },
+    { action: 'getMfaPreference' },
+    { action: 'updateMfaPreference', totp: 'DISABLED' },
+  ];
+  for (const input of actions) {
+    await rejects(() => authApi.setAuthState(input as never), 'not offered');
+  }
+  // Signing in and out still goes through the same API untouched.
+  assert.strictEqual((await authApi.getAuthState()).state, 'signedIn');
+});
+
+test('passkeys: signed out, none of it answers', async () => {
+  await authApi.setAuthState({ action: 'signOut' });
+  await rejects(() => api.listPasskeys(), 'authentication required');
+  await rejects(() => api.startPasskeyRegistration(), 'authentication required');
+  await rejects(
+    () => api.completePasskeyRegistration(JSON.stringify({ id: 'e2e-passkey-2', response: {} })),
+    'authentication required',
+  );
+  await rejects(() => api.deletePasskey('e2e-passkey-1'), 'authentication required');
   await signInAs(USERNAME, PASSWORD);
 });
 
@@ -284,6 +348,7 @@ const ADMIN_PASSWORD = 'E2eAdminPass123!';
 async function signInAs(username: string, password: string): Promise<void> {
   const state = await passSecondFactor(
     await authApi.setAuthState({ action: 'signIn', username, password }),
+    password,
   );
   assert.strictEqual(
     state.state,
@@ -310,7 +375,7 @@ async function signInAs(username: string, password: string): Promise<void> {
  * `challenge` discriminator, and `sharedSecret` on the enrolment step — and
  * copying whatever is there keeps this from having to know which step it is on.
  */
-async function passSecondFactor(state: AuthState): Promise<AuthState> {
+async function passSecondFactor(state: AuthState, password: string): Promise<AuthState> {
   let current = state;
   for (let step = 0; current.state === 'confirmingSignIn' && step < 4; step += 1) {
     const action = current.actions?.find((candidate) => candidate.name === 'confirmSignIn');
@@ -319,7 +384,12 @@ async function passSecondFactor(state: AuthState): Promise<AuthState> {
     for (const field of action.fields ?? []) {
       if (typeof field.defaultValue === 'string') payload[field.name] = field.defaultValue;
     }
-    payload.code = TOTP_CODE;
+    // Choice-based sign-in (`users.authFlow: 'USER_AUTH'`). A deployed pool
+    // takes the password with the first call; the local one asks for it again
+    // as a step of its own. Whichever step this is, it is answered with what
+    // it asks for.
+    if (action.fields?.some((field) => field.name === 'password')) payload.password = password;
+    else payload.code = TOTP_CODE;
     current = await authApi.setAuthState({ action: 'confirmSignIn', ...payload } as never);
   }
   return current;
@@ -1054,6 +1124,32 @@ test('attachments: upload, list, download, and delete round-trip', async () => {
   assert.deepStrictEqual((await api.listAttachments(attachedPageId)).items, [], 'Delete empties the list');
 });
 
+test('attachments: the declared size is signed, so a larger body is refused', async () => {
+  const up = await api.createAttachmentUploadUrl({
+    pageId: attachedPageId,
+    filename: 'small.txt',
+    contentType: 'text/plain',
+    size: 1,
+  });
+  const res = await fetch(up.uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': up.contentType },
+    body: 'more than one byte',
+  });
+  assert.ok(!res.ok, 'A body larger than the declared size must not be stored');
+  assert.deepStrictEqual((await api.listAttachments(attachedPageId)).items, []);
+
+  await rejects(
+    () => api.createAttachmentUploadUrl({
+      pageId: attachedPageId,
+      filename: 'half.txt',
+      contentType: 'text/plain',
+      size: 1.5,
+    }),
+    'file size is required',
+  );
+});
+
 test('attachments: a file name survives being a key segment', async () => {
   // The name is `encodeURIComponent`d into the key and decoded back out, so a
   // space or a non-ASCII character must come back exactly as it went in.
@@ -1277,6 +1373,12 @@ test('safety: the default user group cannot confer global administrator', async 
 
   const set = await api.setDefaults(userGroupId, defaults.version);
   assert.strictEqual(set.defaultUserGroupId, userGroupId);
+  // Held from the other side too: once a group is the default, global
+  // administrator cannot be attached to it afterwards.
+  await rejects(
+    () => api.attachRoleGroupToUserGroup(userGroupId, 'rg_global_admin'),
+    'default user group',
+  );
   // A stale version must not silently overwrite a concurrent change.
   await rejects(() => api.setDefaults(null, defaults.version), 'changed');
   await api.setDefaults(null, set.version);
@@ -2874,6 +2976,16 @@ test('federation: a mapped IdP group carries its members to a role group', async
     reachable.some((entry) => entry.spaceId === ssoSpaceId),
     'The mapped role group did not carry the space to the federated user',
   );
+});
+
+test('federation: a federated account has no passkeys to manage here', async () => {
+  // Its sign-in, and any passkey it uses, belong to its identity provider. The
+  // passkey methods ask the password block, which holds no session for it.
+  await signOutOfEverything();
+  await signInThroughIdpExpectingSession();
+  await rejects(() => api.listPasskeys(), 'authentication required');
+  await rejects(() => api.startPasskeyRegistration(), 'authentication required');
+  await signOutOfEverything();
 });
 
 test('federation: the directory records which door the account came through', async () => {

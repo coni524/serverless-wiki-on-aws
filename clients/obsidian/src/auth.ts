@@ -42,6 +42,7 @@ import {
   type StoredTokens,
   type TokenIssuer,
   connectionOf,
+  isSecureWikiUrl,
   issuedFor,
 } from './settings';
 
@@ -178,6 +179,8 @@ export class AuthClient {
     if (tokens === null || tokens.issuer !== null) return false;
     const { wikiUrl, clientId } = connectionOf(this.host.settings);
     if (wikiUrl === '' || clientId === '') return false;
+    // Discovery over plain http could be answered by anyone on the path.
+    if (!isSecureWikiUrl(wikiUrl)) return false;
     let server: AuthorizationServer;
     try {
       server = await this.authorizationServer(wikiUrl);
@@ -393,7 +396,13 @@ export class AuthClient {
   async signOut(): Promise<void> {
     if (this.legacy) await this.adoptLegacy();
     const tokens = this.usable();
-    if (tokens !== null && tokens.issuer.revocationEndpoint !== null) {
+    // An issuer read over plain http may name anybody's revocation endpoint,
+    // so such tokens are only cleared here, not sent anywhere.
+    if (
+      tokens !== null &&
+      tokens.issuer.revocationEndpoint !== null &&
+      isSecureWikiUrl(tokens.issuer.wikiUrl)
+    ) {
       try {
         await postForm(tokens.issuer.revocationEndpoint, {
           token: tokens.refreshToken,
@@ -419,6 +428,10 @@ export class AuthClient {
   private requireUsable(): BoundTokens {
     const tokens = this.usable();
     if (tokens === null) throw new AuthError(t.notSignedIn);
+    // Tokens stored before plain http was refused may name an http Wiki, and
+    // their token endpoint was read from it unencrypted. Neither the access
+    // token nor the refresh token goes anywhere from such a sign-in.
+    if (!isSecureWikiUrl(tokens.issuer.wikiUrl)) throw new AuthError(t.wikiUrlInsecure);
     return tokens;
   }
 
@@ -434,6 +447,7 @@ export class AuthClient {
     if (config.wikiUrl === '' || config.clientId === '') {
       throw new AuthError(t.configMissing);
     }
+    if (!isSecureWikiUrl(config.wikiUrl)) throw new AuthError(t.wikiUrlInsecure);
     return config;
   }
 
