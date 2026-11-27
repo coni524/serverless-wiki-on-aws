@@ -1,6 +1,6 @@
 {
   "name": "sl-wiki",
-  "version": "2026.11.25",
+  "version": "2026.11.27",
   "private": true,
   "type": "module",
   "blocksTemplate": "react",

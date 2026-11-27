@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="600" viewBox="0 0 1600 600" role="img" aria-labelledby="t" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans', Helvetica, Arial, sans-serif">
-<title id="t">serverless-wiki-on-aws: a Markdown wiki that lives in your own AWS account. Edit in the browser, in Obsidian, or through Claude; one permission check guards all three.</title>
+<title id="t">serverless-wiki-on-aws: a Markdown wiki that lives in your own AWS account. Edit in the browser, with the built-in AI assistant, or through Claude; one permission check guards all three.</title>
 <rect width="1600" height="600" rx="32" fill="#0F2A3D"/>
 <rect x="72" y="64" width="64" height="64" rx="16" fill="#F5A524"/>
 <g transform="translate(84 76) scale(1.6667)" fill="none" stroke="#0F2A3D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h11"/></g>
@@ -7,17 +7,17 @@
 <text x="72" y="232" font-size="64" font-weight="700" fill="#FFFFFF" text-anchor="start">A Markdown wiki that</text>
 <text x="72" y="308" font-size="64" font-weight="700" fill="#FFFFFF" text-anchor="start">lives in <tspan fill="#F5A524">your own</tspan></text>
 <text x="72" y="384" font-size="64" font-weight="700" fill="#FFFFFF" text-anchor="start">AWS account.</text>
-<text x="72" y="462" font-size="25" font-weight="400" fill="#C9D6E2" text-anchor="start">Edit in the browser, in Obsidian, or through Claude.</text>
+<text x="72" y="462" font-size="25" font-weight="400" fill="#C9D6E2" text-anchor="start">Edit in the browser, with the AI assistant, or through Claude.</text>
 <text x="72" y="502" font-size="25" font-weight="400" fill="#C9D6E2" text-anchor="start">One permission check guards all three.</text>
 <text x="72" y="542" font-size="25" font-weight="400" fill="#C9D6E2" text-anchor="start">Nothing runs while nobody is reading.</text>
 <rect x="980" y="102" width="548" height="84" rx="18" fill="#18394F" stroke="#2B5470" stroke-width="2"/>
 <g transform="translate(1008 126) scale(1.5000)" fill="none" stroke="#FFFFFF" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></g>
 <text x="1064" y="154" font-size="26" font-weight="600" fill="#FFFFFF" text-anchor="start">Browser</text>
-<text x="1500" y="153" font-size="20" font-weight="400" fill="#9FB4C6" text-anchor="end">read · edit · ask</text>
+<text x="1500" y="153" font-size="20" font-weight="400" fill="#9FB4C6" text-anchor="end">read · edit · search</text>
 <rect x="980" y="206" width="548" height="84" rx="18" fill="#18394F" stroke="#2B5470" stroke-width="2"/>
-<g transform="translate(1008 230) scale(1.5000)" fill="none" stroke="#FFFFFF" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></g>
-<text x="1064" y="258" font-size="26" font-weight="600" fill="#FFFFFF" text-anchor="start">Obsidian vault</text>
-<text x="1500" y="257" font-size="20" font-weight="400" fill="#9FB4C6" text-anchor="end">two-way sync</text>
+<g transform="translate(1008 230) scale(1.5000)" fill="none" stroke="#FFFFFF" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11h-9l-5 4v-4H4z"/><path d="M8 10.5h8"/></g>
+<text x="1064" y="258" font-size="26" font-weight="600" fill="#FFFFFF" text-anchor="start">AI assistant</text>
+<text x="1500" y="257" font-size="20" font-weight="400" fill="#9FB4C6" text-anchor="end">asks before it writes</text>
 <rect x="980" y="310" width="548" height="84" rx="18" fill="#18394F" stroke="#2B5470" stroke-width="2"/>
 <g transform="translate(1008 334) scale(1.5000)" fill="none" stroke="#FFFFFF" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></g>
 <text x="1064" y="362" font-size="26" font-weight="600" fill="#FFFFFF" text-anchor="start">Claude &amp; MCP clients</text>

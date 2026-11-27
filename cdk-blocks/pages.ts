@@ -61,8 +61,8 @@ export const asPage = (item: Item) => ({
  * Checked wherever a parent is named — creating a node under it, or moving one
  * into it. Nothing repairs a violation after the fact, because the tree has no
  * other record of who may hold children: the edge lives on the child, and a page
- * that acquired one would list as an ordinary child in `gsi1` and mirror into
- * the vault as a note holding notes, which the filesystem cannot represent.
+ * that acquired one would list as an ordinary child in `gsi1` and leave a page
+ * holding pages, the very shape folders exist to rule out.
  */
 export function requireCanHoldChildren(parent: Item): void {
   if (kindOf(parent) !== 'folder') {

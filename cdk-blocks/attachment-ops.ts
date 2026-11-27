@@ -11,9 +11,9 @@
  * never taken from the caller, which would let someone with access to one space
  * name another space's page.
  *
- * Two callers exist: the UI-facing API in `index.ts` and the sync API in
- * `ext.ts`. Uploads and downloads go straight from the client to S3
- * over a short-lived presigned URL; nothing here ever sees the bytes.
+ * The caller is the UI-facing API in `index.ts`. Uploads and downloads go
+ * straight from the client to S3 over a short-lived presigned URL; nothing here
+ * ever sees the bytes.
  */
 import { content } from './resources.js';
 import { attachmentKey } from './model.js';
@@ -129,8 +129,8 @@ function cleanAttachmentId(value: string): string {
  * `size` is the client's declared byte count, checked here against the cap
  * and signed into the URL as the exact `Content-Length`. S3 then accepts a body
  * of that size and no other, so a client that declares a small file cannot
- * send a large one. Browsers and Obsidian set the header from the body, which
- * is why every caller declares the file's real size.
+ * send a large one. Browsers set the header from the body, which is why every
+ * caller declares the file's real size.
  */
 export async function createAttachmentUploadUrl(
   access: Access,

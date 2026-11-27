@@ -503,7 +503,7 @@ export class SyncBusyError extends ApiError {
 // ─── Synchronisation ─────────────────────────────────────────────────────────
 //
 // Two doors bring news of a federated account's IdP groups. A browser sign-in
-// carries them in its ID token. A bearer request (MCP, the sync API) carries
+// carries them in its ID token. A bearer request (MCP) carries
 // none — an access token has no custom attributes — so `bearer-auth.ts` reads
 // them from the pool, which rewrites them on every federated sign-in through
 // any app client. Both go through `syncIdpGroups` below, so the mapping rule,

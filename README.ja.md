@@ -1,11 +1,10 @@
 <p align="center">
-  <img src="assets/readme/hero.ja.svg" width="100%" alt="serverless-wiki-on-aws：あなたの AWS アカウントで動く Markdown の Wiki。ブラウザー、Obsidian、Claude のどこからでも編集でき、3 つの入口は同じ権限チェックを通ります。誰も使っていないあいだは、何も動いていません。">
+  <img src="assets/readme/hero.ja.svg" width="100%" alt="serverless-wiki-on-aws：あなたの AWS アカウントで動く Markdown の Wiki。ブラウザー、AI アシスタント、Claude のどこからでも編集でき、3 つの入口は同じ権限チェックを通ります。誰も使っていないあいだは、何も動いていません。">
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/AWS-Serverless-232F3E?logo=amazonwebservices&logoColor=white" alt="AWS Serverless">
-  <img src="assets/readme/badge-obsidian.svg" alt="Obsidian two-way sync">
   <img src="assets/readme/badge-mcp.svg" alt="MCP with OAuth 2.1">
   <img src="https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white" alt="Node.js 24">
   <img src="https://img.shields.io/badge/pnpm-11-F69220?logo=pnpm&logoColor=white" alt="pnpm 11">
@@ -22,9 +21,9 @@
 
 ## しくみ
 
-![しくみ：ブラウザー、Obsidian、MCP 経由の AI はどれも同じ権限チェックを通り、あなたの AWS アカウントの Lambda、DynamoDB、S3、S3 Vectors、Bedrock、Cognito に届く](assets/readme/how-it-fits.ja.svg)
+![しくみ：ブラウザーと MCP 経由の AI はどちらも同じ権限チェックを通り、あなたの AWS アカウントの Lambda、DynamoDB、S3、S3 Vectors、Bedrock、Cognito に届く](assets/readme/how-it-fits.ja.svg)
 
-ブラウザーの画面、Amazon Bedrock の AI アシスタント、MCP（Model Context Protocol、AI クライアントとツールを接続する標準プロトコル）のクライアント、Obsidian（ローカルの Markdown ノートアプリ）の同期プラグインは、どれも同じページを読み書きし、API 層がリクエストごとに行う同じ権限判定を通ります。
+ブラウザーの画面、Amazon Bedrock の AI アシスタント、MCP（Model Context Protocol、AI クライアントとツールを接続する標準プロトコル）のクライアントは、どれも同じページを読み書きし、API 層がリクエストごとに行う同じ権限判定を通ります。
 動作もデータの保管も運用者の AWS アカウントの中で完結し、常時稼働で常時課金されるリソースはありません。
 デプロイするのは Lambda、API Gateway、DynamoDB、S3、S3 Vectors、CloudFront、Cognito、SQS、Bedrock です。Bedrock には、AI アシスタントを動かす Bedrock AgentCore Runtime を含みます。
 
@@ -35,9 +34,9 @@
 <table>
 <tr>
 <td width="33%" valign="top">
-<img src="assets/readme/icon-sync.svg" width="40" height="40" alt=""><br>
-<b>Obsidian と双方向に同期</b><br>
-スペースが保管庫のフォルダーになります。ノート、フォルダー、貼り付けた画像が両方向に行き来します。
+<img src="assets/readme/icon-mcp.svg" width="40" height="40" alt=""><br>
+<b>Claude から使える</b><br>
+<code>POST /mcp</code> の MCP サーバーを備え、Cognito を通した OAuth 2.1 でサインインします。Claude などの MCP クライアントが、あなたの権限の範囲で読み・検索・書き込みをします。
 </td>
 <td width="33%" valign="top">
 <img src="assets/readme/icon-ai.svg" width="40" height="40" alt=""><br>
@@ -73,7 +72,6 @@ Lambda、DynamoDB、S3。払うのはリクエスト、保存、AI のトーク�
 
 - Markdown のページを、スペースごとのフォルダーとページの木構造で整理します
 - IdP のグループをロールグループに対応づけると、サインインのたびに権限が IdP のグループに合わせて更新されます。パスワードでのサインインと併用できます
-- `POST /mcp` の MCP サーバー。Cognito を認可サーバーとする OAuth 2.1 の認証で、Claude などの MCP クライアントからの接続を受け付けます
 - スペース単位の権限を、API 層がリクエストごとに判定します。利用者が自分でサインアップすることはできず、運用者がアカウントを作ります。自分の権限を上げる API はありません
 - 添付ファイルは presigned URL（署名付き URL、短時間だけ有効なリンク）で配信します。バケットはパブリックアクセスを全面ブロックします
 - AI アシスタントの既定のモデルは Amazon Nova 2 Lite です。環境変数 `AI_MODEL_ID` で別の Bedrock のモデルに変更できます
@@ -153,7 +151,7 @@ aws cognito-idp admin-set-user-password \
 パスワードのアカウントは、サインインした後、アカウントのメニュー（パスキー）からパスキーを登録できます。
 登録した後のブラウザでのサインインは、パスキーだけで済みます。端末の指紋・顔・PIN が、パスワードとコードの両方の代わりになります。
 パスワードと認証アプリは、端末をなくしたときの予備として残ります。
-MCP のクライアントと Obsidian はユーザープール自身の画面でサインインするので、これまでどおりパスワードとコードを使います。
+MCP のクライアントはユーザープール自身の画面でサインインするので、これまでどおりパスワードとコードを使います。
 
 パスキーは、Wiki を配信するドメインに結び付きます。既定は CloudFront のドメインです。
 新しく作るスタックでは、そのドメインが分かる `pnpm run deploy` の 2 回目の段階で有効になります。すでにあるスタックでは、次のデプロイで有効になります。
@@ -186,7 +184,7 @@ IdP の設定を誤って管理者が全員締め出されたときの復旧な�
 
 OIDC に対応した IdP なら、設定する内容はどれも同じです。
 Microsoft Entra ID の画面操作は付録 [`guides/sso-entra-id.ja.md`](guides/sso-entra-id.ja.md) に、OneLogin は付録 [`guides/sso-onelogin.ja.md`](guides/sso-onelogin.ja.md) にあります。
-IdP は Wiki 自身の Cognito ユーザープールに登録するため、連携の利用者もプールのユーザーになります。識別子は全員がプールの `sub` に統一され、連携の利用者も MCP と同期 API をそのまま使えます。
+IdP は Wiki 自身の Cognito ユーザープールに登録するため、連携の利用者もプールのユーザーになります。識別子は全員がプールの `sub` に統一され、連携の利用者も MCP をそのまま使えます。
 
 IdP の設定は、リポジトリルートの設定ファイル `sso.config.json` に書きます。ファイルが無ければ SSO は構成されず、サインイン画面にはパスワードの欄だけが表示されます。ファイルにはテナント ID とクライアント ID が載ります（クライアントシークレットは載せません）。コミットするのは非公開のクローンだけにしてください。
 
@@ -248,15 +246,6 @@ aws cloudformation describe-stacks --stack-name <スタック名> --profile <プ
 </details>
 
 <details>
-<summary><b>Obsidian と同期する</b></summary>
-
-同梱のプラグイン `clients/obsidian/` が、Obsidian の保管庫と、利用者が読めるスペースを同期します。
-両者が食い違ったときは Wiki の内容を優先し、プラグインが手元のファイルを退避してから Wiki の内容で上書きします。
-導入と利用の手順は [clients/obsidian/README.ja.md](clients/obsidian/README.ja.md) にあります。
-
-</details>
-
-<details>
 <summary><b>設定（環境変数）</b></summary>
 
 | 環境変数 | 既定 | 役割 |
@@ -304,7 +293,7 @@ pnpm run destroy           # デプロイしたスタックを消します
 <details>
 <summary><b>構成図（全体）</b></summary>
 
-![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザ・MCP・同期クライアントの呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、S3 Vectors で検索する。AI アシスタントは、Lambda が起動する Bedrock AgentCore Runtime の上で動く](assets/architecture.png)
+![構成図。CloudFront と S3 が SPA を配信し、API Gateway がブラウザと MCP の呼び出しを 1 つの Lambda へ渡す。Lambda が DynamoDB で権限を判定し、本文と添付を S3 に置き、S3 Vectors で検索する。AI アシスタントは、Lambda が起動する Bedrock AgentCore Runtime の上で動く](assets/architecture.png)
 
 *実線の矢印は同期のリクエスト経路を、破線の矢印は非同期の処理の流れを表します。*
 
@@ -347,14 +336,12 @@ serverless-wiki-on-aws/
 │   ├── wiki-ops.ts       # ページ、ツリー、検索の操作
 │   ├── search-index.ts   # 検索の索引への書き込みとハイブリッド検索
 │   ├── mcp.ts            # MCP サーバー（POST /mcp）
-│   ├── ext.ts            # 同期クライアント向け API（POST /ext/*）
 │   └── scripts/          # deploy、sandbox、seed-admin、destroy
 ├── src/                  # フロントエンド（React 19 + Vite + Cloudscape）
 │   ├── app/              # ルーティング、プロバイダー、画面の外枠
 │   ├── features/         # spaces、pages、search、assistant、auth、admin
 │   ├── components/       # feature をまたいで使う UI 部品
 │   └── lib/              # Markdown、差分、ルーター、TanStack Query、日英の辞書
-├── clients/obsidian/     # Obsidian 同期プラグイン
 ├── test/                 # API 全体を通す E2E テストと、単体テスト
 ├── assets/               # この文書に載せる画面の画像、図、アイコン
 └── README.md             # 英語版のこの文書

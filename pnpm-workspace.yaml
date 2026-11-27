@@ -1,6 +1,5 @@
 packages:
   - cdk-blocks
-  - clients/*
 
 allowBuilds:
   esbuild: true

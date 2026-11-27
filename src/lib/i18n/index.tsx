@@ -7,8 +7,8 @@
  * hand-edited value falls back rather than reaching the dictionary.
  *
  * It is deliberately not sent to the server. The API's refusals are written in
- * English for every caller — the screen, the assistant's tools, the MCP server
- * and the sync API alike — so there is no per-request language to negotiate.
+ * English for every caller — the screen, the assistant's tools and the MCP
+ * server alike — so there is no per-request language to negotiate.
  * A refusal that has to be worded for the reader carries a structured error
  * name instead, and the screen words it (`PAGE_HAS_CHILDREN_ERROR` in `lib.tsx`
  * is the one that does). The assistant is the exception, and it is told the

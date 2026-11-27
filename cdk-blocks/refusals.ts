@@ -8,10 +8,10 @@
  *
  * Written in English, as every refusal the API produces is. The callers are a
  * screen that can be read in either language, an assistant answering in the
- * reader's, an MCP client, and a sync plugin — and the request carries no
- * language for any of them to be worded in. A refusal that has to reach the
- * reader in their own language is given a structured error name instead, and
- * the screen words it; `PAGE_HAS_CHILDREN` in `access.ts` is the one that is.
+ * reader's, and an MCP client — and the request carries no language for any of
+ * them to be worded in. A refusal that has to reach the reader in their own
+ * language is given a structured error name instead, and the screen words it;
+ * `PAGE_HAS_CHILDREN` in `access.ts` is the one that is.
  */
 
 /**

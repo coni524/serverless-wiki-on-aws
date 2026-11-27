@@ -1,14 +1,10 @@
 /**
- * Bearer token authentication, shared by every surface reached without a
- * browser.
+ * Bearer token authentication, for the surface reached without a browser.
  *
- * Two such surfaces exist: the MCP server at `/mcp`, which AI clients speak to,
- * and the sync API at `/ext/*`, which the Obsidian plugin speaks to. They serve
- * different callers and different payload shapes, but they answer to the same
- * user pool, the same two scopes, and the same permission walk — so the code
- * that decides *who is calling* lives here rather than in either of them. A
- * second copy could drift, and the copy that drifted would be an authorization
- * decision made two ways.
+ * That surface is the MCP server at `/mcp`, which AI clients speak to. The code
+ * that decides *who is calling* lives here rather than in `mcp.ts`: it answers
+ * to the user pool, the two scopes, and the permission walk, and it carries the
+ * federated-account gate below. None of that is about the MCP protocol itself.
  *
  * What a caller gets back is an `Access`: the resolved result of the three-hop
  * permission walk. It is not a licence to skip the space check —
@@ -85,7 +81,7 @@ export const PUBLIC_ORIGIN = (process.env.MCP_PUBLIC_ORIGIN ?? '').replace(/\/+$
 export const SCOPE_READ = 'slwiki/read';
 export const SCOPE_WRITE = 'slwiki/write';
 
-/** The realm both surfaces name in `WWW-Authenticate`. */
+/** The realm named in `WWW-Authenticate`. */
 const REALM = 'sl-wiki';
 
 /**
@@ -110,8 +106,8 @@ const verifier = OAUTH_CONFIGURED
 /**
  * A refusal that has to carry its own status and headers.
  *
- * `ApiError` covers everything the Wiki's own layers refuse, and each surface's
- * route wrapper already turns one into the right status. This exists for the
+ * `ApiError` covers everything the Wiki's own layers refuse, and the MCP route
+ * wrapper already turns one into the right status. This exists for the
  * OAuth-shaped refusals, which must also carry `WWW-Authenticate` — the header
  * a client reads to find out where to authenticate (RFC 9728).
  */
@@ -197,8 +193,8 @@ export type Caller = { access: Access; scopes: Set<string> };
  * runs. `accessForUser` never provisions: an account that has signed in to
  * Cognito but never to the Wiki has no directory record and is refused here.
  *
- * `metadataUrl` is where the calling surface tells clients to look for its own
- * RFC 9728 document; it only ever ends up inside a refusal header.
+ * `metadataUrl` is where clients are told to look for the RFC 9728 document;
+ * it only ever ends up inside a refusal header.
  *
  * ─── The local-development path ─────────────────────────────────────────────
  * Without a user pool there is nothing to verify a token against, so local
@@ -206,7 +202,7 @@ export type Caller = { access: Access; scopes: Set<string> };
  * `requireAccess`. This is a real sign-in, not a bypass, and it is unreachable
  * on AWS twice over: `index.cdk.ts` always sets the three variables, and the
  * branch additionally refuses to run in any deployed compute. It exists so the
- * e2e suite can drive both surfaces, including the permission refusals, against
+ * e2e suite can drive the MCP server, including the permission refusals, against
  * the local mock.
  */
 export async function authenticate(
@@ -293,10 +289,10 @@ function temporarilyUnavailable(description: string): Refusal {
 //
 // A federated account's permissions come from its IdP's groups, which the
 // pool copies into `custom:groups` each time the account signs in — through
-// the browser or through the hosted sign-in an MCP client or the sync plugin
-// uses. The browser door applies them in its sign-in hook. Nothing else would,
-// so this door applies them too: once per sign-in, when the token's
-// `auth_time` is newer than the sign-in last applied.
+// the browser or through the hosted sign-in an MCP client uses. The browser
+// door applies them in its sign-in hook. Nothing else would, so this door
+// applies them too: once per sign-in, when the token's `auth_time` is newer
+// than the sign-in last applied.
 //
 // Two further rules hold here and nowhere else. A federated token is only
 // accepted for a limited time after its sign-in, because a refresh does not go
@@ -463,10 +459,9 @@ export function registrationsOf(identities: string | undefined): string[] {
 /**
  * Refuse a request whose `Origin` is not this deployment's own.
  *
- * Neither an MCP client nor the sync plugin is a browser, and neither sends an
- * `Origin` at all, so this only bites on a cross-site request made from a page
- * — which, since the local development path authenticates by cookie, is worth
- * refusing.
+ * An MCP client is not a browser and sends no `Origin` at all, so this only
+ * bites on a cross-site request made from a page — which, since the local
+ * development path authenticates by cookie, is worth refusing.
  *
  * What it is compared against matters. With `MCP_PUBLIC_ORIGIN` set it is a
  * fixed value, and the check is a real one. Without it the comparison is
@@ -504,10 +499,9 @@ export function sendRefusal(context: BlocksContext, error: unknown): boolean {
 /**
  * What protects one resource path, and which authorization server issues for it.
  *
- * Both surfaces answer with this same document under their own path, differing
- * only in `resource`. `authorization_servers` names the Wiki's own origin rather
- * than Cognito's, because the Wiki is what writes the RFC 8414 document a client
- * reads next — see the header of `mcp.ts` for why it cannot be Cognito's.
+ * `authorization_servers` names the Wiki's own origin rather than Cognito's,
+ * because the Wiki is what writes the RFC 8414 document a client reads next —
+ * see the header of `mcp.ts` for why it cannot be Cognito's.
  */
 export function protectedResourceDocument(base: string, resourcePath: string) {
   return {

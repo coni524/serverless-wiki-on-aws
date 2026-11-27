@@ -257,22 +257,6 @@ const userPool = userPools[0]!;
  */
 const MCP_CALLBACK_PORT = 33418;
 
-/**
- * Where the Obsidian sync plugin is redirected back to after sign-in.
- *
- * A custom URI scheme rather than a loopback port. Obsidian registers
- * `obsidian://` with the operating system and lets a plugin claim one action
- * under it, so the browser's redirect reopens Obsidian and hands the
- * authorization code straight to the plugin — with no local HTTP server to
- * stand up, which is what a loopback redirect would need and what mobile
- * Obsidian has no way to provide.
- *
- * Cognito accepts a custom scheme here; only `http` is restricted (to
- * loopback). The plugin's own protocol handler must register this exact action
- * name, because Cognito matches redirect URIs whole.
- */
-const OBSIDIAN_CALLBACK_URL = 'obsidian://slwiki-auth';
-
 // The prefix of the hosted sign-in domain, `<prefix>.auth.<region>.amazoncognito.com`.
 //
 // That name space is shared by every AWS account in the region, so the stack
@@ -318,8 +302,8 @@ const mcpDomain = userPool.addDomain('McpSignInDomain', {
 // talked to by the application. Sign-in flows browser → pool hosted UI → IdP →
 // back to the pool (which creates the federated account as a pool user) → the
 // `sso` block's callback. That is what makes a federated user a Cognito user: MCP
-// and `/ext/*` Bearer auth work for them unchanged, and every identifier is
-// the pool's `sub`.
+// Bearer auth works for them unchanged, and every identifier is the pool's
+// `sub`.
 //
 // Everything here describes the IdP's shape and is deploy-time, like
 // `SSO_ISSUER_URL` above. The one secret — the IdP's client secret — never
@@ -487,14 +471,12 @@ const mcpClient = userPool.addClient('McpClient', {
       cdk.aws_cognito.OAuthScope.resourceServer(mcpResourceServer, mcpReadScope),
       cdk.aws_cognito.OAuthScope.resourceServer(mcpResourceServer, mcpWriteScope),
     ],
-    // One app client, three registered redirects, because the two clients that
-    // use it differ only in how they get the code back. Both spellings of
-    // loopback are there because RFC 8252 tells a native client to accept
-    // either, and which one it builds is not ours to choose.
+    // Both spellings of loopback are registered because RFC 8252 tells a
+    // native client to accept either, and which one it builds is not ours to
+    // choose.
     callbackUrls: [
       `http://localhost:${MCP_CALLBACK_PORT}/callback`,
       `http://127.0.0.1:${MCP_CALLBACK_PORT}/callback`,
-      OBSIDIAN_CALLBACK_URL,
     ],
   },
   // Named explicitly rather than left to CDK's auto-detection, whose answer
@@ -585,10 +567,6 @@ new cdk.CfnOutput(blocksStack, 'McpSignInDomain', {
 new cdk.CfnOutput(blocksStack, 'McpCallbackPort', {
   value: String(MCP_CALLBACK_PORT),
   description: 'Loopback port to pass to an MCP client as --callback-port',
-});
-new cdk.CfnOutput(blocksStack, 'ObsidianCallbackUrl', {
-  value: OBSIDIAN_CALLBACK_URL,
-  description: 'Redirect URI the Obsidian sync plugin must register',
 });
 
 // Unconditional, though only federation reads it: the deploy script derives

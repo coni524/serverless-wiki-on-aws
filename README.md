@@ -1,11 +1,10 @@
 <p align="center">
-  <img src="assets/readme/hero.svg" width="100%" alt="serverless-wiki-on-aws: a Markdown wiki that lives in your own AWS account. Edit in the browser, in Obsidian, or through Claude; one permission check guards all three. Nothing runs while nobody is reading.">
+  <img src="assets/readme/hero.svg" width="100%" alt="serverless-wiki-on-aws: a Markdown wiki that lives in your own AWS account. Edit in the browser, with the built-in AI assistant, or through Claude; one permission check guards all three. Nothing runs while nobody is reading.">
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/AWS-Serverless-232F3E?logo=amazonwebservices&logoColor=white" alt="AWS Serverless">
-  <img src="assets/readme/badge-obsidian.svg" alt="Obsidian two-way sync">
   <img src="assets/readme/badge-mcp.svg" alt="MCP with OAuth 2.1">
   <img src="https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white" alt="Node.js 24">
   <img src="https://img.shields.io/badge/pnpm-11-F69220?logo=pnpm&logoColor=white" alt="pnpm 11">
@@ -22,9 +21,9 @@
 
 ## How it fits together
 
-![How it fits together: the browser UI, Obsidian, and AI clients over MCP all pass one permission check, then reach Lambda, DynamoDB, S3, S3 Vectors, Bedrock and Cognito in your own AWS account](assets/readme/how-it-fits.svg)
+![How it fits together: the browser UI and AI clients over MCP both pass one permission check, then reach Lambda, DynamoDB, S3, S3 Vectors, Bedrock and Cognito in your own AWS account](assets/readme/how-it-fits.svg)
 
-The browser UI, the Amazon Bedrock assistant, MCP clients, and the Obsidian sync plugin read and write the same pages through the same space permission check, resolved in the API layer on every request.
+The browser UI, the Amazon Bedrock assistant, and MCP clients read and write the same pages through the same space permission check, resolved in the API layer on every request.
 Everything runs and stores its data inside the operator's own AWS account, and there are no always-on, always-billing resources.
 The deployed stack is Lambda, API Gateway, DynamoDB, S3, S3 Vectors, CloudFront, Cognito, SQS, and Bedrock, including a Bedrock AgentCore Runtime that runs the AI assistant.
 
@@ -35,9 +34,9 @@ The full diagram, with every service and arrow, is under [Reference](#reference)
 <table>
 <tr>
 <td width="33%" valign="top">
-<img src="assets/readme/icon-sync.svg" width="40" height="40" alt=""><br>
-<b>Two-way Obsidian sync</b><br>
-Each space becomes a folder in your vault. Notes, folders and pasted images travel both ways.
+<img src="assets/readme/icon-mcp.svg" width="40" height="40" alt=""><br>
+<b>Use it from Claude</b><br>
+An MCP (Model Context Protocol) server at <code>POST /mcp</code>, signed in with OAuth 2.1 through Cognito. Claude and other MCP clients read, search and write under your own permissions.
 </td>
 <td width="33%" valign="top">
 <img src="assets/readme/icon-ai.svg" width="40" height="40" alt=""><br>
@@ -73,7 +72,6 @@ Also in the box:
 
 - Markdown pages arranged in a folder-and-page tree, one tree per space
 - Map an identity provider's group to a role group, and permissions are updated to match the IdP's groups on every sign-in. Password sign-in keeps working alongside it
-- An MCP (Model Context Protocol) server at `POST /mcp`, authenticated with OAuth 2.1 through Cognito, for Claude and other MCP clients
 - Space-level permissions resolved in the API layer on every request. Sign-up is closed: an operator creates accounts, and no API raises anyone's own permissions
 - Attachments delivered through presigned URLs; the bucket blocks all public access
 - The assistant's default model is Amazon Nova 2 Lite; set `AI_MODEL_ID` to use another Bedrock model
@@ -144,7 +142,7 @@ aws cognito-idp admin-set-user-password \
 
 The pool requires MFA, and TOTP is the only second factor, so the first sign-in in the browser presents an enrolment challenge: scan the QR code with an authenticator app and enter the six-digit code it shows. Every later sign-in asks for a code.
 
-Once signed in, a password account can add a passkey from the account menu (Passkeys). From then on the browser sign-in takes the passkey alone — the device's fingerprint, face or PIN stands in for both the password and the code. The password and the authenticator app stay as the way back in if the device is lost. MCP clients and Obsidian sign in on the user pool's own page, so they keep using the password and a code.
+Once signed in, a password account can add a passkey from the account menu (Passkeys). From then on the browser sign-in takes the passkey alone — the device's fingerprint, face or PIN stands in for both the password and the code. The password and the authenticator app stay as the way back in if the device is lost. MCP clients sign in on the user pool's own page, so they keep using the password and a code.
 
 Passkeys are bound to the domain the Wiki is served from: the CloudFront domain by default. On a new stack they switch on with the second pass of `pnpm run deploy`, once that domain is known; an existing stack gets them on its next deploy. **If you plan to put a custom domain in front, do it before anyone adds a passkey** (set `MCP_PUBLIC_ORIGIN` to it). Changing the domain later — a custom domain, or a stack rebuilt with a new CloudFront domain — leaves every existing passkey unusable; users sign in with their password and a code and add a passkey again.
 
@@ -167,7 +165,7 @@ Every administrator after the first one is added by an administrator, from the a
 <summary><b>Sign in with your identity provider (OIDC)</b></summary>
 
 The settings are the same for every OIDC provider.
-For Microsoft Entra ID, the appendix [`guides/sso-entra-id.md`](guides/sso-entra-id.md) walks through the actual screens; [`guides/sso-onelogin.md`](guides/sso-onelogin.md) does the same for OneLogin. The IdP is registered on the wiki's own Cognito user pool, so federated users become pool users too: everyone is identified by the pool's `sub`, and federated users can use MCP and the sync API as well.
+For Microsoft Entra ID, the appendix [`guides/sso-entra-id.md`](guides/sso-entra-id.md) walks through the actual screens; [`guides/sso-onelogin.md`](guides/sso-onelogin.md) does the same for OneLogin. The IdP is registered on the wiki's own Cognito user pool, so federated users become pool users too: everyone is identified by the pool's `sub`, and federated users can use MCP as well.
 
 The IdP entries live in a config file, `sso.config.json`, at the repository root. Without the file, SSO is not set up and the sign-in screen shows only the password form. The file carries your tenant and client IDs (never the client secret), so commit it to private clones only.
 
@@ -225,13 +223,6 @@ aws cloudformation describe-stacks --stack-name <stack-name> --profile <profile>
 </details>
 
 <details>
-<summary><b>Set up Obsidian sync</b></summary>
-
-The bundled plugin in `clients/obsidian/` syncs an Obsidian vault with the spaces you can read. When the two sides disagree, the wiki's version takes precedence: the plugin backs up your local copy, then overwrites it with the wiki's version. Setup and usage are in [clients/obsidian/README.md](clients/obsidian/README.md).
-
-</details>
-
-<details>
 <summary><b>Configuration variables</b></summary>
 
 | Variable | Default | Purpose |
@@ -276,7 +267,7 @@ pnpm run destroy           # the deployed stack
 <details>
 <summary><b>Full architecture diagram</b></summary>
 
-![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser, MCP, and sync calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and searches with S3 Vectors; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
+![Architecture diagram: CloudFront and S3 serve the SPA; API Gateway routes browser and MCP calls to one Lambda; the Lambda checks permissions in DynamoDB, stores pages and attachments in S3, and searches with S3 Vectors; the AI assistant runs on a Bedrock AgentCore Runtime that the Lambda starts](assets/architecture.png)
 
 *Solid arrows are the request path; dashed arrows are asynchronous or background flows.*
 
@@ -319,14 +310,12 @@ serverless-wiki-on-aws/
 │   ├── wiki-ops.ts       # Page, tree, and search operations
 │   ├── search-index.ts   # Search index writes and hybrid search
 │   ├── mcp.ts            # MCP server (POST /mcp)
-│   ├── ext.ts            # Sync-client API (POST /ext/*)
 │   └── scripts/          # deploy, sandbox, seed-admin, destroy
 ├── src/                  # Frontend (React 19 + Vite + Cloudscape)
 │   ├── app/              # Routes, providers, and the app shell
 │   ├── features/         # spaces, pages, search, assistant, auth, admin
 │   ├── components/       # UI shared across features
 │   └── lib/              # Markdown, diff, router, TanStack Query, i18n dictionaries
-├── clients/obsidian/     # Obsidian sync plugin
 ├── test/                 # End-to-end test across the whole API, and unit tests
 ├── assets/               # Screenshots, diagrams, and icons used by this README
 └── README.md             # This file

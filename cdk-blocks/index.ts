@@ -88,10 +88,6 @@ import {
   suggestPages,
   updatePage as updateWikiPage,
 } from './wiki-ops.js';
-// Imported for its side effect: the module constructs the `RawRoute`s of the
-// external sync API, and a route only exists once its construct is
-// built. Nothing here calls into it.
-import './ext.js';
 import { assistant, type ApprovalDecision } from './assistant.js';
 import { isViewingLocale, withViewing, withoutViewing } from './viewing.js';
 import { withoutDiscardedReplies } from './transcript.js';

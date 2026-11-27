@@ -11,9 +11,6 @@
  * changes but its parent and its position: the page id, the body, the revision
  * and the attachments all stay, so shared links and body links survive.
  *
- * The vault does not move either. What the sync plugin wrote as a folder note
- * `X/X.md` is exactly where "the page X inside the folder X" lands.
- *
  * Idempotent, because F's id is derived from P's rather than drawn fresh: a
  * re-run finds the folder it wrote last time and moves on. That is what makes an
  * interrupted run safe to repeat — and an interrupted run leaves the tree

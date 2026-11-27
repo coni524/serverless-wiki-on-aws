@@ -6,7 +6,7 @@ import type { Page } from '@/types/api';
  *
  * The locale is the reader's own rather than a fixed `ja`. This order is drawn
  * on screen and never stored, so two readers seeing their own locale's order is
- * the same thing Obsidian does with the vault beside it.
+ * harmless: neither reorders anything for the other.
  *
  * It is the browser's locale, not the language the screen is set to. Switching
  * the screen to English changes the words around the tree, not which name the

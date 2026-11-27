@@ -2,10 +2,10 @@
  * Page and search operations, expressed once for every caller.
  *
  * The Wiki's own logic has to sit where the UI-facing API, the AI assistant,
- * and the MCP server can all reach it. This module is that place, and it now
- * has four callers: `index.ts` (one thin ApiNamespace method per function),
- * `assistant.ts` (one agent tool per function), `mcp.ts` (one MCP tool per
- * function), and `ext.ts` (one `/ext/*` route per function).
+ * and the MCP server can all reach it. This module is that place, and it has
+ * three callers: `index.ts` (one thin ApiNamespace method per function),
+ * `assistant.ts` (one agent tool per function), and `mcp.ts` (one MCP tool per
+ * function).
  *
  * Every function takes a resolved `Access` rather than a request context, which
  * is what lets the same code run behind an HTTP request and inside the agent's
@@ -322,8 +322,8 @@ export async function suggestPages(
  * The spaces this caller may read, with the permission held on each, by name.
  *
  * Every surface that shows a user "what can I reach" answers with this: the UI's
- * space list, the MCP `listSpaces` tool, and `/ext/listSpaces`. They differ only
- * in which fields they pass on, so the traversal, the permission resolution and
+ * space list and the MCP `listSpaces` tool. They differ only in which fields
+ * they pass on, so the traversal, the permission resolution and
  * the ordering are settled once here.
  *
  * `readableSpaces` is the permission filter, so nothing the caller cannot read
@@ -361,9 +361,8 @@ const givenCursor = (value: string | null | undefined): string | undefined =>
  * Every page in a space, in key order, one page of results at a time.
  *
  * Served from the primary key rather than an index, because this listing is
- * the one that must not miss a row: reindexing, export, the metadata half of a
- * space delete, and a sync client's whole-space snapshot all ride on
- * it, and `gsi1` is only eventually consistent.
+ * the one that must not miss a row: reindexing, export, and the metadata half
+ * of a space delete all ride on it, and `gsi1` is only eventually consistent.
  *
  * Keyset paging, per the contract `findUsers()` settled: pass the previous
  * `nextCursor` back, and `null` means this was the last page.
@@ -786,8 +785,8 @@ export async function movePage(
 // ─── Folders ─────────────────────────────────────────────────────────────────────
 // A folder is a node with a name, a parent, and a place among its siblings, and
 // nothing else: no body in S3, no attachments, no search document. It is the
-// only kind that may hold children, which is what makes the Wiki's tree and an
-// Obsidian vault's tree the same shape.
+// only kind that may hold children, which is what makes the Wiki's tree read
+// like a file system's: folders hold things, pages are the leaves.
 
 /**
  * Create a folder, at the end of its siblings.

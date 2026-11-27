@@ -65,9 +65,9 @@ export const scope = new Scope('sl-wiki');
 // every passkey made against the wrong address would have to be made again.
 // The sandbox and the local server serve the page from localhost.
 //
-// Only this browser form offers them. The MCP and Obsidian clients sign in on
-// the pool's own hosted page, which lives on the pool's domain; a passkey bound
-// to the Wiki's address does not answer there, so those keep password + TOTP.
+// Only this browser form offers them. MCP clients sign in on the pool's own
+// hosted page, which lives on the pool's domain; a passkey bound to the Wiki's
+// address does not answer there, so those keep password + TOTP.
 export const passkeyOrigin = resolvePasskeyOrigin();
 
 function resolvePasskeyOrigin(): string | undefined {

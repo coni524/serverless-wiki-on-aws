@@ -39,7 +39,7 @@ export const ja = {
   passkeysIntro:
     'パスキーを登録すると、この画面ではパスワードと認証アプリのコードを入れずに、端末の指紋・顔・PIN だけでサインインできます。パスワードと認証アプリは、端末をなくしたときの予備として残ります。',
   passkeysClientsNote:
-    'MCP や Obsidian のサインインでは、これまでどおりパスワードと認証アプリのコードを使います。',
+    'MCP クライアントのサインインでは、これまでどおりパスワードと認証アプリのコードを使います。',
   passkeysEmpty: 'まだパスキーはありません。',
   passkeyAdd: 'この端末にパスキーを追加',
   passkeyUnnamed: '名前のないパスキー',
@@ -96,7 +96,7 @@ export const en: App = {
   passkeysIntro:
     'With a passkey, you sign in here with your device’s fingerprint, face or PIN alone, without your password or an authenticator code. Your password and authenticator app stay as the way back in if you lose the device.',
   passkeysClientsNote:
-    'Signing in from MCP clients or Obsidian still uses your password and an authenticator code.',
+    'Signing in from MCP clients still uses your password and an authenticator code.',
   passkeysEmpty: 'No passkeys yet.',
   passkeyAdd: 'Add a passkey on this device',
   passkeyUnnamed: 'Unnamed passkey',
