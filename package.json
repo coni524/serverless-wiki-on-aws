@@ -32,7 +32,7 @@
     "preview": "vite preview",
     "deploy": "tsx cdk-blocks/scripts/deploy.ts",
     "destroy": "tsx cdk-blocks/scripts/destroy.ts",
-    "test:unit": "tsx --test \"test/unit/*.test.ts\" \"test/unit/*.test.tsx\"",
+    "test:unit": "tsx --test --test-concurrency=1 \"test/unit/*.test.ts\" \"test/unit/*.test.tsx\"",
     "test:e2e": "tsx -C browser test/e2e.test.ts",
     "vendorize": "blocks-vendorize"
   },
