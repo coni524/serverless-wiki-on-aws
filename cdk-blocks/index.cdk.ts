@@ -21,6 +21,8 @@ import {
   ssoProvidersJson,
   ssoSecretName,
 } from './sso-config.js';
+import { loadEntryGuardConfig } from './entry-guard-config.js';
+import { createFrontDoorWebAcl, lockApiToFrontDoor } from './entry-guard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -56,6 +58,29 @@ if (ssoEntries.length > 0) {
   process.env.SSO_PROVIDERS = ssoProvidersJson(ssoEntries);
 }
 
+// ─── Entry guard: who may reach the front door ───────────────────────────────
+// Optional, from `entry-guard.config.json` (tracked, never published); with no
+// file nothing below is created. Never in a sandbox: it has no CloudFront, and
+// the local frontend calls the API stage directly, which the guard would refuse.
+// The CloudFront web ACL has to live in us-east-1, so it gets a companion stack
+// there, and the application stack reads its ARN across regions.
+const entryGuard = sandboxMode ? null : loadEntryGuardConfig();
+// Said out loud on every synth: a missing file removes a deployed guard, and
+// that should not go unnoticed.
+console.log(
+  `[sl-wiki] entry guard: ${sandboxMode ? 'off (sandbox)' : (entryGuard?.mode ?? 'off (no entry-guard.config.json)')}`,
+);
+const frontDoorWebAcl = entryGuard
+  ? createFrontDoorWebAcl(
+      new cdk.Stack(app, `${stackName}-entry-guard`, {
+        env: { account, region: 'us-east-1' },
+        crossRegionReferences: true,
+        description: 'sl-wiki entry guard: the CloudFront web ACL',
+      }),
+      entryGuard,
+    )
+  : null;
+
 // Stack-wide defaults every block reads unless it sets its own option. The
 // production preset retains stateful resources and turns on deletion protection
 // and DynamoDB point-in-time recovery; the sandbox preset tears down cleanly and
@@ -65,6 +90,7 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
   backendHandlerPath: join(__dirname, 'index.handler.ts'),
   backendCDKPath: join(__dirname, 'index.ts'),
   defaults: sandboxMode ? BlocksPresets.sandbox : BlocksPresets.production,
+  ...(frontDoorWebAcl ? { crossRegionReferences: true } : {}),
 });
 
 // The backend module is imported by two computes: the Lambda handler, and the
@@ -477,6 +503,10 @@ const mcpClient = userPool.addClient('McpClient', {
     callbackUrls: [
       `http://localhost:${MCP_CALLBACK_PORT}/callback`,
       `http://127.0.0.1:${MCP_CALLBACK_PORT}/callback`,
+      // claude.ai's custom connectors, registered as "Use your own OAuth
+      // client" with this client's id and no secret (Cognito offers neither
+      // dynamic client registration nor client id metadata documents).
+      'https://claude.ai/api/mcp/auth_callback',
     ],
   },
   // Named explicitly rather than left to CDK's auto-detection, whose answer
@@ -592,12 +622,18 @@ if (ssoRegistrations.length > 0) {
 
 // Add static site hosting only when deploying (not in sandbox mode)
 if (!sandboxMode) {
-  new Hosting(blocksStack, 'Hosting', {
+  const hosting = new Hosting(blocksStack, 'Hosting', {
     root: join(__dirname, '..'),
     buildCommand: 'pnpm run build',
     buildOutputDir: 'dist',
     api: blocksStack,
+    // A web ACL of our own: `webAclArn` takes precedence over `enabled`, so the
+    // block creates none of its own (which would fail outside us-east-1).
+    ...(frontDoorWebAcl
+      ? { frontDoor: { features: { waf: { enabled: true, webAclArn: frontDoorWebAcl.webAclArn } } } }
+      : {}),
   });
+  if (entryGuard) lockApiToFrontDoor(blocksStack, hosting.distribution, entryGuard);
   // Monitoring stays at the block's default (on). CloudFront publishes its
   // metrics only in us-east-1, so the block puts the 5xx alarm and its topic in
   // a companion stack there, which is why the stack above names its account and
