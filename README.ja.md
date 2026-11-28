@@ -243,6 +243,43 @@ aws cloudformation describe-stacks --stack-name <スタック名> --profile <プ
   --query 'Stacks[0].Outputs[?OutputKey==`McpClientId`].OutputValue' --output text
 ```
 
+claude.ai から使うときは、claude.ai の設定でカスタムコネクタを追加し、URL に `https://<CloudFront のドメイン>/mcp` を入れます。
+「Use your own OAuth client」を選び、クライアント ID に `McpClientId` の値を入れ、シークレットは空にします。
+Cognito のサインイン画面が開くので、パスワードと認証アプリのコードでサインインします。
+
+</details>
+
+<details>
+<summary><b>Wiki に届く相手を絞る（任意）</b></summary>
+
+Wiki の中身はもともとサインインが無いと読めませんが、サインイン画面と API にはインターネットの誰でも届きます。
+これを絞るには、リポジトリの直下に `entry-guard.config.json` を置いてデプロイします。
+ファイルが無ければ、以下のものは何も作られません。
+
+```json
+{
+  "mode": "count",
+  "allowCountries": ["JP"],
+  "claudeAi": { "enabled": true }
+}
+```
+
+- `allowCountries` は、すべてのパスに届いてよい国（ISO 3166-1 の 2 文字、大文字）です。自分と利用者がいる国を書きます。運用者ごとの方針なので、このファイルは非公開の clone にだけコミットします。
+- `claudeAi.enabled` を有効にすると、Anthropic が公開している送信元の範囲から MCP の 4 つのパス（`/mcp` と OAuth の発見文書 3 つ）への要求も通します。claude.ai のコネクタは Anthropic のサーバーから来るためです。範囲が変わったときは `claudeAi.sourceRanges` で差し替えます。
+- `rateLimit` は、1 つの送信元 IP が 5 分間に送れる要求の数です（既定は 1000）。
+- `mode` は、`count` なら何も止めずに「止めるはずだった要求」を記録するだけ、`block` なら止めます。
+
+デプロイで足されるもの：
+
+- us-east-1 の別スタック `<スタック名>-entry-guard` に、CloudFront 用の web ACL。CloudFront 用の web ACL は us-east-1 にしか置けないので、us-east-1 も CDK のブートストラップが要ります。止めた（数えた）要求は、そこの CloudWatch Logs のロググループ `aws-waf-logs-<スタック名>-entry-guard` に残り、`authorization`、`cookie`、クエリ文字列は伏せられます。
+- CloudFront が API へ `Referer` ヘッダとして送る、Secrets Manager の値。`block` では REST API のリソースポリシーがこの値の無い要求を拒否するので、`execute-api` の URL に直接来た要求は 403 になります。
+
+最初は `count` でデプロイし、自分の端末やクライアントからの要求が記録に出ていないことを確かめてから `block` に切り替えます。
+海外へ行くときは、出発前に国を足してデプロイします。
+Cognito のサインイン画面のドメイン、Cognito の公開 API、Realtime の WebSocket は対象外です。
+費用は、AWS WAF の web ACL が 1 つ（2027-02-01 からの料金で月約 7.30 ドルと要求の分）と、Secrets Manager の値が月 0.40 ドルです。
+値の取り替え方は v2026.11.28 のリリースノートにあります。
+
 </details>
 
 <details>

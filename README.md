@@ -220,6 +220,35 @@ aws cloudformation describe-stacks --stack-name <stack-name> --profile <profile>
   --query 'Stacks[0].Outputs[?OutputKey==`McpClientId`].OutputValue' --output text
 ```
 
+To use the Wiki from claude.ai, add a custom connector in claude.ai's settings with the URL `https://<CloudFront domain>/mcp`. Choose "Use your own OAuth client", enter the `McpClientId` value as the client ID, and leave the secret blank. Cognito's sign-in screen opens; sign in with your password and authenticator code.
+
+</details>
+
+<details>
+<summary><b>Restrict who can reach the Wiki (optional)</b></summary>
+
+Everything in the Wiki already needs a signed-in user, but the sign-in screen and the API answer anyone on the internet. To narrow that down, put an `entry-guard.config.json` at the repository root and deploy. Without the file, nothing below is created.
+
+```json
+{
+  "mode": "count",
+  "allowCountries": ["JP"],
+  "claudeAi": { "enabled": true }
+}
+```
+
+- `allowCountries` lists the countries (ISO 3166-1 alpha-2, in capitals) whose requests reach every path. Use the countries you and your users are in. The file is your own policy, so commit it to private clones only.
+- `claudeAi.enabled` also lets Anthropic's published outbound ranges reach the four MCP paths (`/mcp` and its three OAuth discovery documents), so claude.ai connectors keep working from Anthropic's servers. `claudeAi.sourceRanges` replaces those ranges if Anthropic changes them.
+- `rateLimit` sets the per-IP limit over five minutes (default 1000).
+- `mode`: `count` refuses nothing and only logs what it would have refused; `block` refuses.
+
+What the deploy adds:
+
+- A CloudFront web ACL in a companion stack `<stack-name>-entry-guard` in us-east-1 (CloudFront web ACLs live nowhere else, so us-east-1 must be CDK-bootstrapped). It logs what it blocks or counts to the CloudWatch log group `aws-waf-logs-<stack-name>-entry-guard` there, with `authorization`, `cookie` and the query string redacted.
+- A Secrets Manager value that CloudFront sends to the API as the `Referer` header. In `block` mode the REST API's resource policy refuses any request without it, so a direct call to the `execute-api` URL gets 403.
+
+Start with `count`, check the log for requests from your own devices and clients, then switch to `block`. Traveling abroad, add the country and deploy before you go. The Cognito sign-in domain, Cognito's public API and the Realtime WebSocket are not covered. Cost: one AWS WAF web ACL (about USD 7.30 per month under the pricing from 2027-02-01, plus requests) and USD 0.40 per month for the secret. The release notes of v2026.11.28 cover rotating the secret.
+
 </details>
 
 <details>
